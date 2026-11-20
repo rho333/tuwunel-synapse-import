@@ -161,7 +161,11 @@ pub async fn synapse_token_count(
 	.next()
 	.await;
 
-	let after = last.map_or(0, |(_, count)| PduCount::from_unsigned(count).into_signed());
+	let Some((_, count)) = last else {
+		return Some(PduCount::min());
+	};
+
+	let after = PduCount::from_unsigned(count).into_signed();
 	let inclusive = matches!(
 		(dir, bound),
 		(Direction::Backward, TokenBound::From) | (Direction::Forward, TokenBound::To)
@@ -230,7 +234,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn stream_tokens_ignore_negative_backfill() -> tuwunel_core::Result {
+	async fn stream_tokens_ignore_negative_backfill_and_exhaust_cleanly() -> tuwunel_core::Result {
 		use ruma::{api::Direction, room_id};
 		use tuwunel_core::config::Figment;
 		use tuwunel_matrix::PduCount;
@@ -257,6 +261,13 @@ mod tests {
 			.synapse_token_count(room_id, "s150_0", Direction::Forward, TokenBound::From)
 			.await;
 		assert_eq!(from_s150, Some(PduCount::Normal(10)));
+
+		// Backward From before earliest event (t1-50) must return PduCount::min() so pagination exhausts.
+		let exhausted = services
+			.timeline
+			.synapse_token_count(room_id, "t1-50", Direction::Backward, TokenBound::From)
+			.await;
+		assert_eq!(exhausted, Some(PduCount::min()));
 
 		Ok(())
 	}
