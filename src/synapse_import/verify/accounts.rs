@@ -109,6 +109,7 @@ async fn users(ctx: &mut Ctx<'_>) -> Result {
 		.collect()
 		.await;
 
+	services.appservice.loaded().await;
 	let senders: HashSet<OwnedUserId> = services
 		.appservice
 		.read()
