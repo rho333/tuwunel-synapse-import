@@ -4,7 +4,7 @@ use axum::extract::State;
 use futures::{StreamExt, TryStreamExt};
 use ruma::{
 	OwnedUserId,
-	api::client::threads::get_threads,
+	api::{Direction, client::threads::get_threads},
 	events::{
 		AnySyncMessageLikeEvent, GlobalAccountDataEventType,
 		ignored_user_list::IgnoredUserListEvent,
@@ -12,7 +12,7 @@ use ruma::{
 	serde::Raw,
 };
 use tuwunel_core::{
-	Err, Result, at,
+	Err, Result, at, err,
 	result::{FlatOk, LogErr},
 	utils::stream::TryWidebandExt,
 };
@@ -20,7 +20,7 @@ use tuwunel_matrix::{
 	Event,
 	pdu::{PduCount, PduEvent},
 };
-use tuwunel_service::rooms::pdu_metadata::IgnoredThreadView;
+use tuwunel_service::rooms::{pdu_metadata::IgnoredThreadView, timeline::TokenBound};
 
 use crate::Ruma;
 
@@ -52,12 +52,17 @@ pub(crate) async fn get_threads_route(
 		.unwrap_or(10)
 		.min(100);
 
-	let from: PduCount = body
-		.from
-		.as_deref()
-		.map(str::parse)
-		.transpose()?
-		.unwrap_or_else(PduCount::max);
+	let from: PduCount = match body.from.as_deref() {
+		| Some(token) => match token.parse() {
+			| Ok(count) => count,
+			| Err(_) => services
+				.timeline
+				.synapse_token_count(room_id, token, Direction::Backward, TokenBound::From)
+				.await
+				.ok_or_else(|| err!(Request(InvalidParam("Invalid `from` token."))))?,
+		},
+		| None => PduCount::max(),
+	};
 
 	// MSC3856: the requester's ignore list adjusts the served threads.
 	let ignored: BTreeSet<OwnedUserId> = services

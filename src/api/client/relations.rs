@@ -22,7 +22,6 @@ use tuwunel_core::{
 	utils::{
 		BoolExt,
 		math::usize_from_ruma_bounded,
-		result::FlatOk,
 		stream::{ReadyExt, WidebandExt},
 	},
 };
@@ -30,7 +29,7 @@ use tuwunel_matrix::{
 	event::{Event, RelationTypeEqual},
 	pdu::{PduCount, PduId},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, rooms::timeline::TokenBound};
 
 use crate::{Ruma, is_ignored_pdu};
 
@@ -129,9 +128,20 @@ async fn paginate_relations_with_filter(
 	recurse: bool,
 	dir: Direction,
 ) -> Result<get_relating_events::v1::Response> {
-	let from: Option<PduCount> = from.map(str::parse).transpose()?;
+	let from: Option<PduCount> = match from {
+		| Some(token) => Some(
+			parse_relation_token(services, room_id, token, dir, TokenBound::From)
+				.await
+				.ok_or_else(|| err!(Request(InvalidParam("Invalid `from` token."))))?,
+		),
+		| None => None,
+	};
 
-	let to: Option<PduCount> = to.map(str::parse).flat_ok();
+	let to: Option<PduCount> = match to {
+		| Some(token) =>
+			parse_relation_token(services, room_id, token, dir, TokenBound::To).await,
+		| None => None,
+	};
 
 	// Spec (v1.10) recommends depth of at least 3
 	let max_depth: usize = if recurse { 3 } else { 0 };
@@ -258,4 +268,21 @@ async fn paginate_relations_with_filter(
 			.map(Event::into_format)
 			.collect(),
 	})
+}
+
+async fn parse_relation_token(
+	services: &Services,
+	room_id: &RoomId,
+	token: &str,
+	dir: Direction,
+	bound: TokenBound,
+) -> Option<PduCount> {
+	match token.parse() {
+		| Ok(count) => Some(count),
+		| Err(_) =>
+			services
+				.timeline
+				.synapse_token_count(room_id, token, dir, bound)
+				.await,
+	}
 }
