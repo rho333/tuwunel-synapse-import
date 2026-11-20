@@ -32,6 +32,10 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		.filter_map(|row| user_id(row, 0).ok())
 		.collect();
 
+	for user_id in &erased {
+		services.users.set_erased(user_id);
+	}
+
 	let rows = source
 		.rows(
 			"SELECT room_id, room_version, coalesce(is_public, false) FROM rooms ORDER BY \
