@@ -52,11 +52,11 @@ impl SynapsePosition {
 		match kind {
 			| "t" => {
 				let (topological, stream) = rest.split_once('-')?;
-				let stream = stream.parse().ok()?;
+				let (min_stream, max_stream) = parse_stream_part(stream)?;
 				Some(Self {
 					topological: Some(topological.parse().ok()?),
-					min_stream: stream,
-					max_stream: stream,
+					min_stream,
+					max_stream,
 				})
 			},
 			| "s" => {
@@ -68,13 +68,7 @@ impl SynapsePosition {
 				})
 			},
 			| "m" => {
-				let mut parts = rest.split('~');
-				let min_stream: i64 = parts.next()?.parse().ok()?;
-				let mut max_stream = min_stream;
-				for part in parts.filter(|part| !part.is_empty()) {
-					let (_, pos) = part.split_once('.')?;
-					max_stream = max_stream.max(pos.parse().ok()?);
-				}
+				let (min_stream, max_stream) = parse_stream_part(rest)?;
 				Some(Self {
 					topological: None,
 					min_stream,
@@ -172,6 +166,18 @@ pub async fn synapse_token_count(
 	Some(PduCount::from_signed(if inclusive { after.saturating_add(1) } else { after }))
 }
 
+fn parse_stream_part(rest: &str) -> Option<(i64, i64)> {
+	let mut parts = rest.split('~');
+	let min_stream: i64 = parts.next()?.parse().ok()?;
+	let mut max_stream = min_stream;
+	for part in parts.filter(|part| !part.is_empty()) {
+		let (_, pos) = part.split_once('.')?;
+		max_stream = max_stream.max(pos.parse().ok()?);
+	}
+
+	Some((min_stream, max_stream))
+}
+
 /// Offset binary, so negative (backfilled) stream orderings sort first.
 fn bias(stream: i64) -> u64 { stream.wrapping_sub(i64::MIN).cast_unsigned() }
 
@@ -200,6 +206,13 @@ mod tests {
 			topological: None,
 			min_stream: 400,
 			max_stream: 410
+		});
+
+		let tw = SynapsePosition::parse("t11-421~1.425~2.419_0_0").unwrap();
+		assert_eq!(tw, SynapsePosition {
+			topological: Some(11),
+			min_stream: 421,
+			max_stream: 425
 		});
 
 		assert!(SynapsePosition::parse("m5~").is_some());
