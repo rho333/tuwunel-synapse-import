@@ -65,6 +65,10 @@ pub(super) async fn import(
 	)
 	.await?;
 
+	// Before final current state is installed, so each late redaction checks
+	// power levels at its own snapshot before current state takes over.
+	redactions::apply_late(services, source, room_id, shortroomid, &state_lock, report).await?;
+
 	let state =
 		set_current_state(services, room_id, &state_rows, &mut groups, last_group, &state_lock)
 			.await?;
@@ -82,9 +86,6 @@ pub(super) async fn import(
 			 extremities naming an event that wasn't imported"
 		));
 	}
-
-	// After current state, so the room's power levels decide who could redact.
-	redactions::apply_late(services, source, room_id, shortroomid, &state_lock, report).await?;
 
 	Ok(true)
 }
