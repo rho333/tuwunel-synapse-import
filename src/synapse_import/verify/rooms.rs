@@ -2,9 +2,13 @@
 //! state, memberships and forward extremities, plus a deep check of a sample
 //! of its events; then rooms tuwunel has that Synapse doesn't, and aliases.
 
-use std::collections::{BTreeSet, HashSet};
+use std::{
+	collections::{BTreeSet, HashSet},
+	future::ready,
+	pin::pin,
+};
 
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use ruma::{
 	CanonicalJsonObject, EventId, OwnedEventId, OwnedRoomAliasId, OwnedRoomId, OwnedUserId,
 	RoomId, RoomVersionId, UserId,
@@ -14,7 +18,7 @@ use tuwunel_matrix::{RoomVersionRules, pdu::from_incoming_federation, room_versi
 
 use super::{
 	super::{
-		rooms::{convert, room_version as supported_version},
+		rooms::{convert, room_version as supported_version, timeline as room_timeline},
 		source::user_id,
 	},
 	Ctx, events,
@@ -128,19 +132,23 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 			},
 		};
 
-		if !exists {
-			ctx.out.missing("rooms", &room_id, "no such room");
-			continue;
-		}
-
-		info!("Verifying room {room_id} ({} of {total})", i.saturating_add(1));
-		ctx.out.rooms = ctx.out.rooms.saturating_add(1);
 		let room = Room {
 			id: &room_id,
 			rules: room_version::rules(&version)?,
 			version,
 			erased: &erased,
 		};
+
+		if !exists {
+			match unimportable_room(ctx, &room).await? {
+				| Some(why) => ctx.out.excuse("rooms", &room_id, why),
+				| None => ctx.out.missing("rooms", &room_id, "no such room"),
+			}
+			continue;
+		}
+
+		info!("Verifying room {room_id} ({} of {total})", i.saturating_add(1));
+		ctx.out.rooms = ctx.out.rooms.saturating_add(1);
 
 		metadata(ctx, &room, row.get(2)).await;
 		timeline::walk(ctx, &room).await?;
@@ -164,6 +172,60 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 	}
 
 	aliases(ctx).await
+}
+
+async fn unimportable_room(ctx: &Ctx<'_>, room: &Room<'_>) -> Result<Option<String>> {
+	let critical = ctx
+		.source
+		.rows(
+			"SELECT c.type, c.event_id, (SELECT j.json FROM event_json j WHERE j.event_id = \
+			 c.event_id) FROM current_state_events c WHERE c.room_id = $1 AND c.state_key = '' \
+			 AND c.type IN ('m.room.create', 'm.room.power_levels')",
+			&[&room.id.as_str()],
+		)
+		.await?;
+
+	for row in &critical {
+		let (kind, event_id, json): (&str, &str, Option<&str>) =
+			(row.get(0), row.get(1), row.get(2));
+		let valid = json.is_some_and(|json| {
+			convert(room.id, event_id, json, &room.version, &room.rules, room.erased).is_ok()
+		});
+		if !valid {
+			return Ok(Some(format!("critical state {kind} could not be imported")));
+		}
+	}
+
+	let mut stream = pin!(
+		room_timeline(ctx.source, room.id)
+			.await?
+			.try_filter(|placement| ready(!placement.soft_failed))
+	);
+
+	let mut saw_any = false;
+	while let Some(placement) = stream.try_next().await? {
+		saw_any = true;
+		let event_id = placement.event_id.as_str();
+		let rows = ctx
+			.source
+			.rows("SELECT json FROM event_json WHERE event_id = $1", &[&event_id])
+			.await?;
+		let Some(row) = rows.first() else {
+			continue;
+		};
+
+		if convert(room.id, event_id, row.get(0), &room.version, &room.rules, room.erased)
+			.is_ok()
+			&& state::unplaceable(ctx, event_id).await?.is_none()
+		{
+			return Ok(None);
+		}
+	}
+
+	Ok(Some(match saw_any {
+		| false => "Synapse holds no timeline events".to_owned(),
+		| true => "none of its timeline events could be imported".to_owned(),
+	}))
 }
 
 async fn metadata(ctx: &mut Ctx<'_>, room: &Room<'_>, public: bool) {
