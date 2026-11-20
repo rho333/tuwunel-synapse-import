@@ -208,6 +208,12 @@ impl Mas {
 				"OAuth sessions of clients acting for themselves (client credentials): tuwunel \
 				 has none",
 			),
+			(
+				"user_registration_tokens",
+				"WHERE revoked_at IS NULL AND coalesce(expires_at > now(), true) AND \
+				 coalesce(usage_limit > times_used, true)",
+				"MAS registration tokens: recreate active tokens in tuwunel if needed",
+			),
 		];
 
 		for (table, filter, what) in leftovers {
