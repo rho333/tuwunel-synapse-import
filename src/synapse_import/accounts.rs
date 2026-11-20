@@ -21,6 +21,7 @@ pub(super) struct Auth {
 	pub(super) deactivated: bool,
 	pub(super) guest: bool,
 	pub(super) locked: bool,
+	pub(super) unapproved: bool,
 }
 
 pub(super) async fn import(
@@ -81,12 +82,14 @@ pub(super) fn auth(
 	user_id: &UserId,
 	mas_users: Option<&HashMap<OwnedUserId, MasUser>>,
 ) -> Auth {
+	let unapproved: bool = row.get(8);
 	let synapse = Auth {
 		password_hash: row.get(1),
 		admin: row.get(2),
 		deactivated: row.get(3),
 		guest: row.get(4),
-		locked: row.get(5),
+		locked: row.get::<_, bool>(5) || unapproved,
+		unapproved,
 	};
 
 	match mas_users.map(|users| users.get(user_id)) {
@@ -98,6 +101,7 @@ pub(super) fn auth(
 			deactivated: user.deactivated,
 			guest: user.guest,
 			locked: user.locked,
+			unapproved: false,
 		},
 	}
 }
@@ -154,7 +158,7 @@ async fn import_user(
 		Report::count(&mut report.admins);
 	}
 
-	import_moderation(services, row, user_id, auth.locked, report);
+	import_moderation(services, row, user_id, auth.locked, auth.unapproved, report);
 	Report::count(&mut report.users);
 	Ok(())
 }
@@ -166,10 +170,10 @@ fn import_moderation(
 	row: &Row,
 	user_id: &UserId,
 	locked: bool,
+	unapproved: bool,
 	report: &mut Report,
 ) {
-	let (suspended, shadow_banned, unapproved): (bool, bool, bool) =
-		(row.get(6), row.get(7), row.get(8));
+	let (suspended, shadow_banned): (bool, bool) = (row.get(6), row.get(7));
 
 	let by = &services.globals.server_user;
 	if locked {
@@ -189,7 +193,7 @@ fn import_moderation(
 
 	if unapproved {
 		report.skip(format!(
-			"{user_id}: tuwunel has no registration approval; the user can now log in"
+			"{user_id}: tuwunel has no registration approval; imported locked"
 		));
 	}
 }
