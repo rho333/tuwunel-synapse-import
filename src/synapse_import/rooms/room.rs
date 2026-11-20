@@ -40,7 +40,7 @@ pub(super) async fn import(
 		.get_or_create_shortroomid(room_id)
 		.await;
 
-	let skipped =
+	let mut skipped =
 		events::store_outliers(services, source, room_id, version, erased, report).await?;
 
 	if let Some(missing_critical) = unstored_critical_state(services, &state_rows).await {
@@ -53,7 +53,17 @@ pub(super) async fn import(
 	let mut groups = StateGroups::load(services, source, room_id).await?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
-	append_timeline(services, source, room_id, version, &mut groups, &state_lock, report).await?;
+	append_timeline(
+		services,
+		source,
+		room_id,
+		version,
+		&mut groups,
+		&mut skipped,
+		&state_lock,
+		report,
+	)
+	.await?;
 
 	let state = set_current_state(services, room_id, &state_rows, &state_lock).await?;
 	let extremities =
@@ -102,12 +112,14 @@ async fn unstored_critical_state<'a>(
 
 /// Gives each timeline event the state before it, then appends it, or only
 /// marks it soft-failed.
+#[expect(clippy::too_many_arguments)]
 async fn append_timeline(
 	services: &Services,
 	source: &Source,
 	room_id: &RoomId,
 	room_version: &RoomVersionId,
 	groups: &mut StateGroups,
+	skipped: &mut HashSet<String>,
 	state_lock: &RoomMutexGuard,
 	report: &mut Report,
 ) -> Result {
@@ -142,6 +154,7 @@ async fn append_timeline(
 			.get_outlier_pdu_json(event_id)
 			.await
 		else {
+			skipped.insert(event_id.to_string());
 			continue;
 		};
 
@@ -158,6 +171,7 @@ async fn append_timeline(
 			});
 
 		let Some(before) = report.keep(format_args!("{room_id} event {event_id}"), before) else {
+			skipped.insert(event_id.to_string());
 			continue;
 		};
 
@@ -232,14 +246,15 @@ async fn set_current_state(
 		);
 	}
 
+	let state = Arc::new(state);
 	let saved = services
 		.state_compressor
-		.save_state(room_id, Arc::new(state))
+		.save_state(room_id, state.clone())
 		.await?;
 
 	services
 		.state
-		.force_state(room_id, saved.shortstatehash, saved.added, saved.removed, state_lock)
+		.sync_imported_state(room_id, saved.shortstatehash, &state, state_lock)
 		.await?;
 
 	Ok(dropped)
