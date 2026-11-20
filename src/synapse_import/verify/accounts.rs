@@ -155,7 +155,11 @@ async fn profiles(ctx: &mut Ctx<'_>) -> Result {
 			continue;
 		}
 
-		let want: (Option<String>, Option<String>) = (row.get(1), row.get(2));
+		let want: (Option<String>, Option<String>) = (
+			row.get(1),
+			row.get::<_, Option<String>>(2)
+				.filter(|url| !url.is_empty()),
+		);
 		let have = (
 			services.profile.displayname(&user_id).await.ok(),
 			services
