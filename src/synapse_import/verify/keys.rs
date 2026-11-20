@@ -21,7 +21,8 @@ use super::super::source::Source;
 
 #[derive(Default)]
 pub(super) struct Keys {
-	map: PublicKeyMap,
+	tuwunel: PublicKeyMap,
+	synapse: PublicKeyMap,
 	asked: BTreeSet<OwnedServerName>,
 }
 
@@ -43,41 +44,48 @@ impl Keys {
 
 		for row in rows {
 			for (key_id, key) in parse_key_json(row.get(1)) {
-				keys.insert(row.get(0), key_id, key);
+				keys.insert_synapse(row.get(0), key_id, key);
 			}
 		}
 
 		if source.has_table("server_signature_keys").await? {
 			let rows = source
-				.rows("SELECT server_name, key_id, verify_key FROM server_signature_keys", &[])
+				.rows(
+					"SELECT server_name, key_id, verify_key FROM server_signature_keys WHERE \
+					 server_name IS NOT NULL AND key_id IS NOT NULL AND verify_key IS NOT NULL",
+					&[],
+				)
 				.await?;
 
 			for row in rows {
-				keys.insert(row.get(0), row.get(1), Base64::new(row.get(2)));
+				keys.insert_synapse(row.get(0), row.get(1), Base64::new(row.get(2)));
 			}
 		}
 
 		Ok(keys)
 	}
 
-	fn insert(&mut self, server: &str, key_id: String, key: Base64) {
-		self.map
-			.entry(server.to_owned())
-			.or_default()
-			.insert(key_id, key);
+	pub(super) fn insert_synapse(&mut self, server: &str, key_id: String, key: Base64) {
+		insert_key(&mut self.synapse, server, key_id, key);
 	}
 
-	/// Re-verifies `event`, in its federation form, after adding the keys
-	/// tuwunel holds for the servers whose signatures it needs.
+	pub(super) fn insert_tuwunel(&mut self, server: &str, key_id: String, key: Base64) {
+		insert_key(&mut self.tuwunel, server, key_id, key);
+	}
+
+	/// Re-verifies `served` strictly against the keys Tuwunel holds, consulting
+	/// Synapse's key cache only when Tuwunel cannot verify so missing imported
+	/// server keys are flagged instead of masked.
 	pub(super) async fn verify(
 		&mut self,
 		services: &Services,
-		event: &CanonicalJsonObject,
+		served: &CanonicalJsonObject,
+		synapse_event: &CanonicalJsonObject,
 		rules: &RoomVersionRules,
-	) -> Outcome {
-		let servers = match required_server_signatures_to_verify_event(event, &rules.signatures) {
+	) -> (Outcome, bool) {
+		let servers = match required_server_signatures_to_verify_event(served, &rules.signatures) {
 			| Ok(servers) => servers,
-			| Err(e) => return Outcome::Failed(e.to_string()),
+			| Err(e) => return (Outcome::Failed(e.to_string()), false),
 		};
 
 		for server in servers {
@@ -87,13 +95,79 @@ impl Keys {
 					.verify_keys_for(&server)
 					.await
 				{
-					self.insert(server.as_str(), key_id.to_string(), key.key);
+					self.insert_tuwunel(server.as_str(), key_id.to_string(), key.key);
 				}
 			}
 		}
 
-		classify(verify_event(&self.map, event, rules))
+		self.verify_loaded(served, synapse_event, rules)
 	}
+
+	/// Compares verification under `self.tuwunel` against `self.tuwunel ∪ self.synapse`.
+	/// Returns `(outcome, excused_in_synapse)`.
+	pub(super) fn verify_loaded(
+		&self,
+		served: &CanonicalJsonObject,
+		synapse_event: &CanonicalJsonObject,
+		rules: &RoomVersionRules,
+	) -> (Outcome, bool) {
+		match classify(verify_event(&self.tuwunel, served, rules)) {
+			| out @ (Outcome::Verified | Outcome::Redacted) => (out, false),
+			| Outcome::Unverifiable(server) => {
+				let combined = self.combined_for(served, rules);
+				match classify(verify_event(&combined, served, rules)) {
+					| Outcome::Verified | Outcome::Redacted => (
+						Outcome::Failed(format!(
+							"tuwunel lacks signing key for {server} that Synapse holds"
+						)),
+						false,
+					),
+					| Outcome::Unverifiable(_) => (Outcome::Unverifiable(server), false),
+					| Outcome::Failed(e) => match classify(verify_event(&combined, synapse_event, rules)) {
+						| Outcome::Failed(_) => (Outcome::Failed(e), true),
+						| _ => (Outcome::Failed(e), false),
+					},
+				}
+			},
+			| Outcome::Failed(e) => {
+				let combined = self.combined_for(synapse_event, rules);
+				match classify(verify_event(&combined, synapse_event, rules)) {
+					| Outcome::Failed(_) => (Outcome::Failed(e), true),
+					| _ => (Outcome::Failed(e), false),
+				}
+			},
+		}
+	}
+
+	fn combined_for(
+		&self,
+		event: &CanonicalJsonObject,
+		rules: &RoomVersionRules,
+	) -> PublicKeyMap {
+		let mut map = PublicKeyMap::new();
+		let Ok(servers) = required_server_signatures_to_verify_event(event, &rules.signatures)
+		else {
+			return map;
+		};
+
+		for server in servers {
+			let entry = map.entry(server.to_string()).or_default();
+			if let Some(keys) = self.synapse.get(server.as_str()) {
+				entry.extend(keys.iter().map(|(k, v)| (k.clone(), v.clone())));
+			}
+			if let Some(keys) = self.tuwunel.get(server.as_str()) {
+				entry.extend(keys.iter().map(|(k, v)| (k.clone(), v.clone())));
+			}
+		}
+
+		map
+	}
+}
+
+fn insert_key(map: &mut PublicKeyMap, server: &str, key_id: String, key: Base64) {
+	map.entry(server.to_owned())
+		.or_default()
+		.insert(key_id, key);
 }
 
 pub(super) fn classify(result: Result<Verified, VerificationError>) -> Outcome {
