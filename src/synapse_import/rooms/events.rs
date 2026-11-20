@@ -35,9 +35,9 @@ pub(crate) struct Placement {
 	pub(super) synapse_position: (i64, i64),
 }
 
-/// Stores every event of the room as an outlier. Auth chains and rejected
-/// events stay that way; the timeline's events are appended from them later.
-/// Events tuwunel can't store are reported, and their IDs returned.
+/// Stores every accepted event of the room as an outlier first: auth chains stay
+/// that way, while timeline events are appended from them later. Rejected events
+/// are excluded because tuwunel treats all stored PDUs as non-rejected.
 pub(super) async fn store_outliers(
 	services: &Services,
 	source: &Source,
@@ -50,9 +50,9 @@ pub(super) async fn store_outliers(
 	let mut rows = pin!(
 		source
 			.stream(
-				"SELECT e.event_id, j.json, e.outlier OR e.rejection_reason IS NOT NULL OR \
-				 r.event_id IS NOT NULL FROM events e JOIN event_json j USING (event_id) LEFT \
-				 JOIN rejections r USING (event_id) WHERE e.room_id = $1",
+				"SELECT e.event_id, j.json, e.outlier FROM events e JOIN event_json j USING \
+				 (event_id) LEFT JOIN rejections r USING (event_id) WHERE e.room_id = $1 AND \
+				 e.rejection_reason IS NULL AND r.event_id IS NULL",
 				&[&room_id.as_str()],
 			)
 			.await?
