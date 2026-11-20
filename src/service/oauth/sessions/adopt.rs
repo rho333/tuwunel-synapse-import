@@ -3,7 +3,6 @@ use std::str::from_utf8;
 use futures::StreamExt;
 use ruma::UserId;
 use tuwunel_core::{Result, err, implement, utils::random_string, warn};
-use tuwunel_database::Cbor;
 
 use super::{SESSION_ID_LENGTH, Session, Sessions};
 use crate::{
@@ -188,17 +187,7 @@ pub async fn adopt_subject(
 		..Default::default()
 	};
 
-	let sess_id = session
-		.sess_id
-		.as_deref()
-		.expect("adopted session id was just initialized");
-
-	let mut txn = self.db.database.txn();
-
-	txn.raw_put(&self.db.oauthid_session, sess_id, Cbor(&session));
-	txn.insert_raw(&self.db.oauthuniqid_oauthid, &unique_id, sess_id);
-
-	txn.execute();
+	self.put_locked(&session, Some(&unique_id)).await;
 
 	Ok(Adoption::Adopted)
 }

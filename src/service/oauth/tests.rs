@@ -210,5 +210,23 @@ async fn adopting_a_subject_refuses_unusable_users_and_taken_keys() -> Result {
 	assert_eq!(adopt(alice).await?, Adoption::AlreadyBound);
 	assert_eq!(adopt(bob).await?, Adoption::Collision);
 
+	let listed = sessions
+		.get_sess_id_by_user(alice)
+		.try_collect::<Vec<_>>()
+		.await?;
+	assert_eq!(listed.len(), 1, "adopted subject populates userid_oauthid");
+
+	let Deletions { complete, unresolved, absent, unreadable } =
+		services.oauth.delete_user_sessions(alice).await?;
+	assert_eq!((complete + unresolved, absent, unreadable), (1, 0, 0));
+	assert!(
+		sessions
+			.get_sess_id_by_user(alice)
+			.try_collect::<Vec<_>>()
+			.await
+			.is_missing(),
+		"adopted session deleted cleanly via user index"
+	);
+
 	Ok(())
 }
