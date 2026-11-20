@@ -44,21 +44,28 @@ async fn list(services: &Services, source: &Source, report: &mut Report) -> Resu
 	let mut rows = pin!(
 		source
 			.stream(
-				"SELECT a.user_id, a.event_id, a.actions, a.highlight, a.profile_tag, \
-				 e.received_ts FROM event_push_actions a JOIN events e USING (event_id) WHERE \
-				 a.notif = 1 AND a.user_id IN (SELECT name FROM users) ORDER BY \
-				 a.stream_ordering",
+				"SELECT a.user_id, a.event_id, a.actions, coalesce(a.highlight, 0) = 1, \
+				 a.profile_tag, coalesce(e.received_ts, e.origin_server_ts) FROM \
+				 event_push_actions a JOIN events e USING (event_id) WHERE a.notif = 1 AND \
+				 a.user_id IN (SELECT name FROM users) ORDER BY a.stream_ordering",
 				&[],
 			)
 			.await?
 	);
 
 	while let Some(row) = rows.try_next().await? {
-		match import_notification(services, &row).await {
+		let Ok(uid) = user_id(&row, 0) else {
+			report.skip(format!("notification of {:?}: invalid user ID", row.get::<_, &str>(0)));
+			continue;
+		};
+		if !services.users.is_active(&uid).await {
+			continue;
+		}
+
+		match import_notification(services, &uid, &row).await {
 			| Ok(()) => Report::count(&mut report.notifications),
 			| Err(e) => report.skip(format!(
-				"{}'s notification for {}: {e}",
-				row.get::<_, &str>(0),
+				"{uid}'s notification for {}: {e}",
 				row.get::<_, &str>(1)
 			)),
 		}
@@ -67,14 +74,13 @@ async fn list(services: &Services, source: &Source, report: &mut Report) -> Resu
 	Ok(())
 }
 
-async fn import_notification(services: &Services, row: &Row) -> Result {
-	let user_id = user_id(row, 0)?;
+async fn import_notification(services: &Services, user_id: &ruma::UserId, row: &Row) -> Result {
 	let event_id = OwnedEventId::try_from(row.get::<_, &str>(1)).map_err(|e| err!("{e}"))?;
-	let actions = actions(row.get(2), row.get::<_, i16>(3) == 1)?;
+	let actions = actions(row.get(2), row.get::<_, bool>(3))?;
 	let ts = row
 		.get::<_, Option<i64>>(5)
 		.and_then(|ts| u64::try_from(ts).ok())
-		.ok_or_else(|| err!("Synapse has no time it received the event"))?;
+		.ok_or_else(|| err!("Synapse has no timestamp for the event"))?;
 
 	let pdu_id: PduId = services
 		.timeline
@@ -92,13 +98,14 @@ async fn import_notification(services: &Services, row: &Row) -> Result {
 		sroomid: pdu_id.shortroomid,
 		tag: row
 			.get::<_, Option<&str>>(4)
+			.filter(|tag| !tag.is_empty())
 			.map(ProfileTag::from),
 		actions,
 	};
 
 	services
 		.pusher
-		.import_notification(&user_id, count, &notified);
+		.import_notification(user_id, count, &notified);
 
 	Ok(())
 }
