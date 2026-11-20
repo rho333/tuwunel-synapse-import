@@ -2,11 +2,13 @@ use icu_normalizer::ComposingNormalizerBorrowed;
 
 use crate::{Result, err};
 
-/// Synapse defaults to 12; each step doubles the time a check holds a worker.
-const MAX_COST: u8 = 16;
+/// `bcrypt` rejects costs below 4; Synapse defaults to 12, and each step
+/// doubles the time a check holds a worker.
+const MIN_COST: u8 = 4;
+const MAX_COST: u8 = 18;
 
 /// Whether a stored password hash is bcrypt, as Synapse writes them, at a cost
-/// of at most 16.
+/// of 4 to 18.
 ///
 /// `$2x$` is refused: it marks hashes made with crypt_blowfish's sign-extension
 /// bug, which the `bcrypt` crate doesn't reproduce.
@@ -16,10 +18,11 @@ pub fn is_bcrypt_hash(hash: &str) -> bool {
 		&& ["$2a$", "$2b$", "$2y$"]
 			.iter()
 			.any(|prefix| hash.starts_with(prefix))
+		&& hash.as_bytes().get(6) == Some(&b'$')
 		&& hash
 			.get(4..6)
 			.and_then(|cost| cost.parse::<u8>().ok())
-			.is_some_and(|cost| cost <= MAX_COST)
+			.is_some_and(|cost| (MIN_COST..=MAX_COST).contains(&cost))
 }
 
 /// Verifies a plaintext password against a bcrypt hash written by Synapse.
@@ -56,11 +59,13 @@ mod tests {
 	}
 
 	#[test]
-	fn refuses_2x_and_excessive_cost() {
+	fn refuses_2x_and_out_of_range_cost() {
 		assert!(is_bcrypt_hash(&TEMP123.replacen("$2b$", "$2y$", 1)));
 		assert!(!is_bcrypt_hash(&TEMP123.replacen("$2b$", "$2x$", 1)));
-		assert!(is_bcrypt_hash(&TEMP123.replacen("$04$", "$16$", 1)));
-		assert!(!is_bcrypt_hash(&TEMP123.replacen("$04$", "$17$", 1)));
+		assert!(!is_bcrypt_hash(&TEMP123.replacen("$04$", "$03$", 1)));
+		assert!(!is_bcrypt_hash(&TEMP123.replacen("$04$", "$04X", 1)));
+		assert!(is_bcrypt_hash(&TEMP123.replacen("$04$", "$18$", 1)));
+		assert!(!is_bcrypt_hash(&TEMP123.replacen("$04$", "$19$", 1)));
 		assert!(!is_bcrypt_hash(&TEMP123.replacen("$04$", "$ab$", 1)));
 	}
 
