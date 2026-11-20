@@ -129,6 +129,7 @@ pub(super) fn apply_rule(
 	actions: Value,
 ) -> Result {
 	let (kind, rule_id) = split_rule_id(namespaced)?;
+	let actions = normalize_actions(actions);
 
 	// Synapse records new actions for a default rule as a rule of its own.
 	if rule_id.starts_with('.') {
@@ -166,6 +167,25 @@ pub(super) fn apply_rule(
 	ruleset
 		.insert(rule, None, None)
 		.map_err(|e| err!("{e}"))
+}
+
+/// Translates Synapse's legacy `"coalesce"` (notify) and `"dont_notify"`
+/// (empty action list) strings into standard Matrix actions.
+pub(super) fn normalize_actions(actions: Value) -> Value {
+	let Value::Array(items) = actions else {
+		return actions;
+	};
+
+	Value::Array(
+		items
+			.into_iter()
+			.filter_map(|item| match item.as_str() {
+				| Some("coalesce") => Some(Value::String("notify".into())),
+				| Some("dont_notify") => None,
+				| _ => Some(item),
+			})
+			.collect(),
+	)
 }
 
 /// `global/content/my_rule` into its kind and the rule ID clients see.
