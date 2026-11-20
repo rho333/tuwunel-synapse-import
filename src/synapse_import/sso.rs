@@ -7,7 +7,10 @@
 
 use ruma::UserId;
 use tuwunel_core::{Result, config::IdentityProvider};
-use tuwunel_service::{Services, oauth::sessions::Adoption};
+use tuwunel_service::{
+	Services,
+	oauth::{identity_issuer, sessions::Adoption},
+};
 use url::Url;
 
 use super::{
@@ -129,10 +132,9 @@ fn matching_provider<'a>(services: &'a Services, issuer: &str) -> Option<&'a Ide
 		.identity_provider
 		.values()
 		.find(|provider| {
-			provider
-				.issuer_url
-				.as_ref()
-				.is_some_and(|url| same_issuer(url, &issuer))
+			identity_issuer(provider)
+				.and_then(|url| Url::parse(url).ok())
+				.is_some_and(|url| same_issuer(&url, &issuer))
 		})
 }
 
