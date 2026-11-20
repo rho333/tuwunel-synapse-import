@@ -514,19 +514,28 @@ async fn append_member_effects(
 		| _ => None,
 	};
 
-	self.services
-		.state_cache
-		.update_membership(MembershipUpdate {
-			room_id: pdu.room_id(),
-			user_id,
-			membership_event: content,
-			sender: pdu.sender(),
-			last_state: stripped_state,
-			invite_via: None,
-			update_joined_count: true,
-			count,
-		})
-		.await?;
+	let update = MembershipUpdate {
+		room_id: pdu.room_id(),
+		user_id,
+		membership_event: content,
+		sender: pdu.sender(),
+		last_state: stripped_state,
+		invite_via: None,
+		update_joined_count: delivery.is_live(),
+		count,
+	};
+
+	if delivery.is_live() {
+		self.services
+			.state_cache
+			.update_membership(update)
+			.await?;
+	} else {
+		self.services
+			.state_cache
+			.update_imported_membership(update)
+			.await?;
+	}
 
 	if is_invite && delivery.is_live() {
 		self.services
