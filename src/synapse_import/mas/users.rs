@@ -3,10 +3,7 @@
 use std::collections::HashMap;
 
 use ruma::OwnedUserId;
-use tuwunel_core::{
-	Result,
-	utils::hash::{PhcString, mark_keyed_argon2_hash},
-};
+use tuwunel_core::{Result, utils::hash::mark_keyed_argon2_hash};
 use tuwunel_service::Services;
 
 use super::{
@@ -25,11 +22,11 @@ pub(in super::super) struct MasUser {
 }
 
 /// Each user with their newest password, which MAS treats as the current one.
-const USERS: &str = "SELECT '@' || u.username || ':' || $1, u.can_request_admin, u.locked_at IS \
-                     NOT NULL, u.deactivated_at IS NOT NULL, u.is_guest, p.hashed_password, \
-                     p.version FROM users u LEFT JOIN LATERAL (SELECT hashed_password, version \
-                     FROM user_passwords WHERE user_id = u.user_id ORDER BY created_at DESC \
-                     LIMIT 1) p ON true ORDER BY u.username";
+const USERS: &str = "SELECT '@' || u.username || ':' || $1, u.can_request_admin IS TRUE, \
+                     u.locked_at IS NOT NULL, u.deactivated_at IS NOT NULL, u.is_guest IS TRUE, \
+                     p.hashed_password, p.version FROM users u LEFT JOIN LATERAL (SELECT \
+                     hashed_password, version FROM user_passwords WHERE user_id = u.user_id \
+                     ORDER BY created_at DESC LIMIT 1) p ON true ORDER BY u.username";
 
 pub(in super::super) async fn users(
 	mas: &Mas,
@@ -60,10 +57,13 @@ pub(in super::super) async fn users(
 		}
 
 		let password_hash = match hash.filter(|_| usable) {
-			| Some(hash) if keyed(scheme)? => Some(
-				// Left unmarked on failure, so storing it fails and is reported.
-				mark_keyed_argon2_hash(&hash).map_or(hash, PhcString::into_string),
-			),
+			| Some(hash) if keyed(scheme)? => match mark_keyed_argon2_hash(&hash) {
+				| Ok(marked) => Some(marked.into_string()),
+				| Err(e) => {
+					report.skip(format!("{user_id}: cannot mark MAS Argon2 hash: {e}"));
+					None
+				},
+			},
 			| hash => hash,
 		};
 
