@@ -16,7 +16,7 @@ use super::{
 
 /// A user's auth state, from Synapse or, with MAS, from MAS.
 pub(super) struct Auth {
-	password_hash: Option<String>,
+	pub(super) password_hash: Option<String>,
 	pub(super) admin: bool,
 	pub(super) deactivated: bool,
 	pub(super) guest: bool,
