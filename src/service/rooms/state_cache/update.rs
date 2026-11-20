@@ -166,6 +166,50 @@ pub async fn update_membership(
 	Ok(())
 }
 
+/// Applies a membership transition from imported history without triggering live
+/// side effects (predecessor account-data copy, push-badge refresh, or forced
+/// room forget on leave).
+#[implement(super::Service)]
+pub async fn update_imported_membership(
+	&self,
+	MembershipUpdate {
+		room_id,
+		user_id,
+		membership_event,
+		last_state,
+		invite_via,
+		update_joined_count,
+		count,
+		..
+	}: MembershipUpdate<'_>,
+) -> Result {
+	self.ensure_remote_user(user_id).await?;
+
+	match membership_event.membership {
+		| MembershipState::Join => {
+			self.mark_as_joined(user_id, room_id, count);
+		},
+		| MembershipState::Invite => {
+			self.mark_as_invited(user_id, room_id, count, last_state, invite_via)
+				.await?;
+		},
+		| MembershipState::Leave | MembershipState::Ban => {
+			self.mark_as_left(user_id, room_id, count);
+		},
+		| MembershipState::Knock => {
+			self.mark_as_knocked(user_id, room_id, count, last_state)
+				.await?;
+		},
+		| _ => {},
+	}
+
+	if update_joined_count {
+		self.update_joined_count(room_id).await;
+	}
+
+	Ok(())
+}
+
 /// Rebuilds a room's aggregate membership and server indexes.
 ///
 /// Current join, invite, and knock rows are counted, and participating servers
