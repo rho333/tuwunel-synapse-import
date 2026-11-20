@@ -244,7 +244,46 @@ async fn exercise_resilience(services: &Services, base: &str) -> Result {
 		.post(&format!("rooms/{room}/join"), &json!({}))
 		.await?;
 
+	exercise_redactions(services, &room).await?;
 	exercise_sync_imported_state(services, &fork_loser, &room).await
+}
+
+async fn exercise_redactions(services: &Services, room: &RoomId) -> Result {
+	let remote_msg_id = event_id!("$remote_msg_to_redact");
+	append_raw_imported(services, room, json!({
+		"event_id": remote_msg_id,
+		"room_id": room,
+		"sender": "@user:remote.example",
+		"origin_server_ts": 1000,
+		"type": "m.room.message",
+		"content": { "msgtype": "m.text", "body": "secret text" },
+		"prev_events": [],
+		"auth_events": [],
+		"depth": 10
+	}))
+	.await?;
+
+	append_raw_imported(services, room, json!({
+		"event_id": "$remote_mod_redaction",
+		"room_id": room,
+		"sender": "@mod:remote.example",
+		"origin_server_ts": 1001,
+		"type": "m.room.redaction",
+		"redacts": remote_msg_id,
+		"content": { "redacts": remote_msg_id },
+		"prev_events": [remote_msg_id],
+		"auth_events": [],
+		"depth": 11
+	}))
+	.await?;
+
+	let after_redact = services.timeline.get_pdu(remote_msg_id).await?;
+	assert!(
+		after_redact.get_content_as_value().get("body").is_none(),
+		"same-server federated redaction must redact target body during import"
+	);
+
+	Ok(())
 }
 
 async fn exercise_sync_imported_state(
@@ -337,6 +376,22 @@ async fn exercise_sync_imported_state(
 		Some(MembershipState::Join),
 		"fork-loser absent from final state cleared from joined members"
 	);
+
+	Ok(())
+}
+
+async fn append_raw_imported(
+	services: &Services,
+	room: &RoomId,
+	value: serde_json::Value,
+) -> Result {
+	let (pdu, pdu_json) = raw_pdu(value)?;
+	let state_lock = services.state.mutex.lock(room).await;
+	services.state.append_to_state(&pdu).await?;
+	services
+		.timeline
+		.append_imported_pdu(&pdu, pdu_json, &state_lock)
+		.await?;
 
 	Ok(())
 }
