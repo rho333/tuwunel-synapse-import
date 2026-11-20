@@ -592,9 +592,12 @@ pub fn update(mut config: Figment, args: &Args) -> Result<Figment> {
 
 	#[cfg(feature = "synapse_import")]
 	if args.import_dry_run {
-		let database_path = config
-			.extract_inner::<PathBuf>("database_path")
-			.map_err(|e| err!(Config("database_path", "{e}")))?;
+		let database_path = match config.find_value("database_path") {
+			| Ok(_) => config
+				.extract_inner::<PathBuf>("database_path")
+				.map_err(|e| err!(Config("database_path", "{e}")))?,
+			| Err(_) => PathBuf::from("/var/lib/tuwunel"),
+		};
 
 		// From the file name, so a trailing slash can't put it inside the real database.
 		let mut name = database_path
@@ -790,6 +793,47 @@ mod tests {
 			Args::try_parse_from(["tuwunel".into(), long(option), "1".into()])
 				.expect("one histogram bucket accepted");
 		}
+	}
+
+	#[cfg(feature = "synapse_import")]
+	#[test]
+	fn import_dry_run_defaults_database_path_and_respects_cli_option() {
+		let argv = [
+			"tuwunel",
+			"--import-synapse",
+			"homeserver.yaml",
+			"--synapse-db",
+			"postgresql://localhost/synapse",
+			"--import-dry-run",
+		];
+		let raw = updated(&argv, Figment::new()).expect("accepted without database_path in TOML");
+		assert_eq!(
+			raw.find_value("database_path")
+				.expect("dry-run path set")
+				.into_string()
+				.as_deref(),
+			Some("/var/lib/tuwunel.dry-run"),
+		);
+
+		let argv_opt = [
+			"tuwunel",
+			"-O",
+			r#"database_path="/srv/tuwunel""#,
+			"--import-synapse",
+			"homeserver.yaml",
+			"--synapse-db",
+			"postgresql://localhost/synapse",
+			"--import-dry-run",
+		];
+		let raw_opt = updated(&argv_opt, Figment::new()).expect("accepted with -O database_path");
+		assert_eq!(
+			raw_opt
+				.find_value("database_path")
+				.expect("dry-run path derived from -O")
+				.into_string()
+				.as_deref(),
+			Some("/srv/tuwunel.dry-run"),
+		);
 	}
 
 	#[cfg(feature = "synapse_import")]
