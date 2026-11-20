@@ -4,9 +4,10 @@
 //! them to a pure `*_problem` function that words the refusal, so every
 //! refusal is unit-tested without a server (see `preflight/tests.rs`).
 
-use std::{ops::RangeInclusive, path::Path};
+use std::{collections::HashSet, ops::RangeInclusive, path::Path};
 
-use ruma::signatures::Ed25519KeyPair;
+use futures::StreamExt;
+use ruma::{OwnedUserId, signatures::Ed25519KeyPair};
 use tuwunel_core::{Err, Result, info};
 use tuwunel_service::{Services, server_keys::read_synapse_key_file};
 
@@ -127,10 +128,34 @@ async fn check_target(
 		.await?
 		.is_empty();
 
-	let users = services.users.count().await;
-	target_problems(server_user, taken, resuming, users)
-		.into_iter()
-		.for_each(problem);
+	services.appservice.loaded().await;
+	let internal: HashSet<OwnedUserId> = services
+		.appservice
+		.read()
+		.await
+		.values()
+		.map(|info| info.sender.clone())
+		.chain(std::iter::once(services.globals.server_user.clone()))
+		.collect();
+
+	let non_internal_users = services
+		.users
+		.stream()
+		.filter(|user_id| {
+			let keep = !internal.contains(*user_id);
+			async move { keep }
+		})
+		.count()
+		.await;
+
+	target_problems(
+		server_user,
+		taken,
+		resuming,
+		non_internal_users.saturating_add(1),
+	)
+	.into_iter()
+	.for_each(problem);
 
 	Ok(())
 }
