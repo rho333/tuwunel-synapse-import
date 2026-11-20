@@ -449,6 +449,41 @@ async fn filter_set_under_chosen_id_replaces_it() -> Result {
 	Ok(())
 }
 
+#[tokio::test]
+async fn count_one_time_keys_raw_neither_prunes_nor_seeds_zeroes() -> Result {
+	let config = Figment::new().merge(("one_time_key_limit", 1));
+	let Some(fixture) = fixture(config).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@otk-raw:localhost");
+	let (with_keys, keyless) = (device_id!("WITHKEYS"), device_id!("KEYLESS"));
+	create_devices(users, user_id, &[with_keys, keyless]).await?;
+
+	let k1 = <&OneTimeKeyId>::try_from("curve25519:AAAAAQ")?;
+	let k2 = <&OneTimeKeyId>::try_from("curve25519:AAAAAg")?;
+	let val: Raw<OneTimeKey> = from_value(json!("otk-value"))?;
+	users
+		.add_one_time_keys(user_id, with_keys, &[(k1.to_owned(), val.clone())].into(), 1)
+		.await?;
+	users
+		.add_one_time_keys(user_id, with_keys, &[(k2.to_owned(), val)].into(), 1)
+		.await?;
+
+	// Keyless device returns empty map rather than seeded zero entries.
+	assert!(users.count_one_time_keys_raw(user_id, keyless).await.is_empty());
+
+	// Over-limit device keeps both keys when queried via raw count.
+	let alg = OneTimeKeyAlgorithm::from("curve25519");
+	let raw_counts = users.count_one_time_keys_raw(user_id, with_keys).await;
+	assert_eq!(raw_counts.get(&alg), Some(&2_u32.into()));
+	let raw_again = users.count_one_time_keys_raw(user_id, with_keys).await;
+	assert_eq!(raw_again.get(&alg), Some(&2_u32.into()));
+
+	Ok(())
+}
+
 fn key_pair(version: &str) -> Ed25519KeyPair {
 	Ed25519KeyPair::from_der(&Ed25519KeyPair::generate(), version.into())
 		.expect("generated key pair should parse")
