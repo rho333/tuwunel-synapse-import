@@ -171,3 +171,100 @@ async fn assert_forgetting(services: &Services) -> Result {
 
 	Ok(())
 }
+
+#[test]
+fn imported_membership_updates_skip_forced_forget() -> Result {
+	let args = Args::default_test(&["fresh", "cleanup"]);
+	let option = args
+		.option
+		.into_iter()
+		.chain([
+			"forget_forced_upon_leave=true".into(),
+			"log_global_default=false".into(),
+		])
+		.collect();
+
+	let args = Args { maintenance: true, option, ..args };
+	let runtime = Runtime::new(Some(&args))?;
+	let server = Server::new(Some(&args), Some(&runtime))?;
+
+	runtime.block_on(async {
+		let services = async_start(&server).await?;
+		let outcome = exercise_imported(&services).await;
+		let shutdown = server.server.shutdown();
+
+		drop(services);
+
+		let run = async_run(&server).await;
+		let stop = async_stop(&server).await;
+
+		outcome.and(shutdown).and(run).and(stop)
+	})
+}
+
+async fn exercise_imported(services: &Services) -> Result {
+	let cache = &services.state_cache;
+	let local = UserId::parse_with_server_name("imported", services.globals.server_name())?;
+	let local_banned =
+		UserId::parse_with_server_name("imported-banned", services.globals.server_name())?;
+	let remote = user_id!("@remote:imported.example");
+	let invited = user_id!("@invited:imported.example");
+	let knocked = user_id!("@knocked:imported.example");
+
+	let live_room = room_id!("!live-forget:example.org");
+	transition(services, live_room, &local, MembershipState::Join).await?;
+	transition(services, live_room, &local, MembershipState::Leave).await?;
+	assert!(
+		!cache.is_left(&local, live_room).await,
+		"baseline: live leave forgets the room when forget_forced_upon_leave=true"
+	);
+
+	let room = room_id!("!imported:example.org");
+	let apply = async |user_id: &UserId, membership: MembershipState, update_joined_count: bool| {
+		cache
+			.update_imported_membership(MembershipUpdate {
+				room_id: room,
+				user_id,
+				membership_event: RoomMemberEventContent::new(membership),
+				sender: user_id,
+				last_state: None,
+				invite_via: None,
+				update_joined_count,
+				count: PduCount::Normal(*services.globals.next_count()),
+			})
+			.await
+	};
+
+	// Join with update_joined_count=false marks membership and ensures remote
+	// user without rebuilding aggregate counts yet.
+	apply(&local, MembershipState::Join, false).await?;
+	apply(remote, MembershipState::Join, false).await?;
+	assert!(cache.is_joined(&local, room).await);
+	assert!(cache.is_joined(remote, room).await);
+	assert!(services.users.exists(remote).await);
+	cache.room_joined_count(room).await.unwrap_err();
+
+	// Invite and Knock with update_joined_count=true rebuild aggregate counts.
+	apply(invited, MembershipState::Invite, false).await?;
+	apply(knocked, MembershipState::Knock, true).await?;
+	assert!(cache.is_invited(invited, room).await);
+	assert!(cache.is_knocked(knocked, room).await);
+	assert_eq!(cache.room_joined_count(room).await?, 2);
+	assert_eq!(cache.room_invited_count(room).await?, 1);
+	assert_eq!(cache.room_knocked_count(room).await?, 1);
+
+	// Leave and Ban via update_imported_membership preserve is_left even when
+	// forget_forced_upon_leave=true.
+	apply(&local, MembershipState::Leave, true).await?;
+	assert!(!cache.is_joined(&local, room).await);
+	assert!(cache.is_left(&local, room).await);
+	assert_eq!(cache.room_joined_count(room).await?, 1);
+
+	apply(&local_banned, MembershipState::Join, false).await?;
+	apply(&local_banned, MembershipState::Ban, true).await?;
+	assert!(!cache.is_joined(&local_banned, room).await);
+	assert!(cache.is_left(&local_banned, room).await);
+	assert_eq!(cache.room_joined_count(room).await?, 1);
+
+	Ok(())
+}
