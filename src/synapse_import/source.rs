@@ -158,7 +158,13 @@ impl Drop for Source {
 
 /// A connection inside a read-only repeatable-read transaction.
 async fn open(url: &str) -> Result<(Client, JoinHandle<()>)> {
-	let (client, connection) = tokio_postgres::connect(url, NoTls)
+	let mut pg_config: tokio_postgres::Config = url
+		.parse()
+		.map_err(|e| err!("Cannot connect to the Synapse database: {e}"))?;
+	pg_config.keepalives(true);
+
+	let (client, connection) = pg_config
+		.connect(NoTls)
 		.await
 		.map_err(|e| err!("Cannot connect to the Synapse database: {e}"))?;
 
@@ -169,7 +175,10 @@ async fn open(url: &str) -> Result<(Client, JoinHandle<()>)> {
 	});
 
 	client
-		.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+		.batch_execute(
+			"SET statement_timeout = 0; SET idle_in_transaction_session_timeout = 0; BEGIN \
+			 ISOLATION LEVEL REPEATABLE READ READ ONLY",
+		)
 		.await
 		.map_err(|e| err!("Cannot open a Synapse database snapshot: {e}"))?;
 
