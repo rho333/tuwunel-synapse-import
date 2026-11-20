@@ -105,3 +105,11 @@ fn predecessors_before_gives_up_on_disagreement_or_a_gap() {
 	assert_eq!(disagree.expect("every group is present"), None);
 	assert_eq!(gap.expect("every group is present"), None);
 }
+
+#[test]
+fn cycle_in_state_group_edges_returns_an_error() {
+	let mut groups = state_groups([(1, Some(2), vec![(1, 10)]), (2, Some(1), vec![(2, 20)])]);
+
+	let err = groups.state(1).unwrap_err();
+	assert!(err.to_string().contains("cycle"), "{err}");
+}

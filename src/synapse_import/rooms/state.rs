@@ -8,7 +8,7 @@
 mod tests;
 
 use std::{
-	collections::{HashMap, hash_map::Entry},
+	collections::{HashMap, HashSet, hash_map::Entry},
 	pin::pin,
 };
 
@@ -228,6 +228,7 @@ impl StateGroups {
 	/// delta on the way back down.
 	fn build(&self, group: i64) -> Result<State> {
 		let mut chain = Vec::new();
+		let mut visited = HashSet::new();
 		let mut state = State::new();
 		let mut next = Some(group);
 
@@ -235,6 +236,10 @@ impl StateGroups {
 			if let Some(cached) = self.cache.get(&id) {
 				state.clone_from(cached);
 				break;
+			}
+
+			if !visited.insert(id) {
+				return Err!("Synapse state_group_edges contains a cycle at group {id}");
 			}
 
 			let Some(found) = self.groups.get(&id) else {
