@@ -226,19 +226,21 @@ async fn import_profiles(services: &Services, source: &Source, report: &mut Repo
 
 		let displayname: Option<String> = row.get(1);
 		if displayname.is_some() {
-			services
+			let set = services
 				.profile
-				.set_displayname(&user_id, displayname.as_deref(), None)
-				.await?;
+				.set_displayname(&user_id, displayname.as_deref(), Some(Propagation::None))
+				.await;
+			report.keep(format_args!("{user_id} displayname"), set);
 		}
 
 		let avatar_url: Option<String> = row.get(2);
 		if let Some(avatar_url) = avatar_url {
 			let avatar_url = OwnedMxcUri::from(avatar_url);
-			services
+			let set = services
 				.profile
-				.set_avatar_url(&user_id, Some(&avatar_url), None)
-				.await?;
+				.set_avatar_url(&user_id, Some(&avatar_url), Some(Propagation::None))
+				.await;
+			report.keep(format_args!("{user_id} avatar_url"), set);
 		}
 
 		let fields = row.get::<_, Option<&str>>(3).and_then(|fields| {

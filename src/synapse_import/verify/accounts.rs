@@ -6,7 +6,10 @@ use std::collections::{BTreeSet, HashSet};
 use futures::StreamExt;
 use ruma::{OwnedDeviceId, OwnedUserId, UserId};
 use tuwunel_core::Result;
-use tuwunel_service::users::device::{MAX_DEVICE_ID_LENGTH, TOKEN_LENGTH};
+use tuwunel_service::{
+	profile::MAX_PROFILE_SIZE,
+	users::device::{MAX_DEVICE_ID_LENGTH, TOKEN_LENGTH},
+};
 
 use super::{
 	super::{
@@ -165,6 +168,9 @@ async fn profiles(ctx: &mut Ctx<'_>) -> Result {
 
 		if want == have {
 			ctx.out.matched("profiles");
+		} else if profile_oversized(&want) {
+			ctx.out
+				.excuse("profiles", &user_id, "profile exceeds MAX_PROFILE_SIZE");
 		} else {
 			ctx.out
 				.differs("profiles", &user_id, format!("Synapse {want:?}, tuwunel {have:?}"));
@@ -172,6 +178,18 @@ async fn profiles(ctx: &mut Ctx<'_>) -> Result {
 	}
 
 	Ok(())
+}
+
+fn profile_oversized(want: &(Option<String>, Option<String>)) -> bool {
+	let mut map = serde_json::Map::new();
+	if let Some(displayname) = &want.0 {
+		map.insert("displayname".to_owned(), serde_json::Value::String(displayname.clone()));
+	}
+	if let Some(avatar_url) = &want.1 {
+		map.insert("avatar_url".to_owned(), serde_json::Value::String(avatar_url.clone()));
+	}
+
+	serde_json::to_vec(&map).is_ok_and(|bytes| bytes.len() > MAX_PROFILE_SIZE)
 }
 
 async fn devices(ctx: &mut Ctx<'_>) -> Result {
