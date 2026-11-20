@@ -816,7 +816,7 @@ pub async fn fetch_remote_profile(&self, user_id: &UserId) -> Result {
 
 /// MSC4133 maximum total profile size (64 KiB), measured over the JSON of the
 /// full profile including displayname and avatar_url.
-pub(super) const MAX_PROFILE_SIZE: usize = 65_536;
+pub const MAX_PROFILE_SIZE: usize = 65_536;
 
 /// Reject a prospective profile write exceeding the MSC4133 64 KiB cap.
 ///
