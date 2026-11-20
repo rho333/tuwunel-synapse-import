@@ -2,13 +2,13 @@
 //! imports them onto Synapse's devices the same way.
 
 use ruma::OwnedDeviceId;
-use tuwunel_core::{Result, utils::random_string};
-use tuwunel_service::{Services, users::device::TOKEN_LENGTH};
+use tuwunel_core::Result;
+use tuwunel_service::Services;
 
 use super::{
 	super::{
 		Report,
-		sessions::{Token, Tokens},
+		sessions::{Token, Tokens, standin_access_token},
 		source::user_id,
 	},
 	Mas,
@@ -60,11 +60,13 @@ pub(in super::super) async fn tokens(
 			let refresh: Option<String> = row.get(4);
 
 			// MAS deletes spent access tokens; tuwunel keeps a refresh token only
-			// beside one, so an already expired stand-in carries it.
+			// beside one, so a deterministic already-expired stand-in carries it.
 			let (token, valid_until_ms) = match row.get::<_, Option<String>>(2) {
 				| Some(token) => (token, row.get(3)),
-				| None if refresh.is_some() => (random_string(TOKEN_LENGTH), Some(0)),
-				| None => continue,
+				| None => match refresh.as_deref() {
+					| Some(refresh) => (standin_access_token(refresh), Some(0)),
+					| None => continue,
+				},
 			};
 
 			tokens.insert((user_id, device_id), Token { token, valid_until_ms, refresh, oidc });

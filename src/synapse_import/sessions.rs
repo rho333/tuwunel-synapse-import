@@ -4,10 +4,10 @@ use std::{collections::HashMap, net::IpAddr, time::Duration};
 
 use ruma::{
 	DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UserId,
-	serde::Raw as RawJson,
+	serde::{Base64, Raw as RawJson},
 };
 use tokio_postgres::Row;
-use tuwunel_core::{Result, err};
+use tuwunel_core::{Result, err, utils::hash::sha256};
 use tuwunel_service::{Services, users::device::TOKEN_LENGTH};
 
 use super::{
@@ -240,6 +240,14 @@ pub(super) async fn latest_tokens(source: &Source, report: &mut Report) -> Resul
 	Ok(tokens)
 }
 
+/// Deterministic, secret-derived stand-in access token for a refresh-only
+/// session: already expired (`valid_until_ms = 0`), unguessable without the
+/// refresh token, and identical when re-derived by `--import-verify`.
+pub(super) fn standin_access_token(refresh_token: &str) -> String {
+	let digest = sha256::delimited(["tuwunel-standin", refresh_token].into_iter());
+	Base64::<ruma::serde::base64::UrlSafe, _>::new(digest).encode()
+}
+
 /// An expired token still imports; it just fails as it would have on Synapse.
 fn expires_in(valid_until_ms: i64) -> Duration {
 	let now: i64 = MilliSecondsSinceUnixEpoch::now().get().into();
@@ -257,8 +265,9 @@ mod tests {
 	use std::time::Duration;
 
 	use ruma::MilliSecondsSinceUnixEpoch;
+	use tuwunel_service::users::device::TOKEN_LENGTH;
 
-	use super::expires_in;
+	use super::{expires_in, standin_access_token};
 
 	#[test]
 	fn expired_tokens_expire_at_once() {
@@ -273,5 +282,17 @@ mod tests {
 		assert!(left <= Duration::from_mins(1));
 		assert!(left > Duration::from_secs(50));
 		assert!(expires_in(i64::MAX) > Duration::from_mins(1));
+	}
+
+	#[test]
+	fn standin_access_tokens_are_deterministic_and_secret_derived() {
+		let a1 = standin_access_token("syr_refresh_secret_alpha");
+		let a2 = standin_access_token("syr_refresh_secret_alpha");
+		let b = standin_access_token("syr_refresh_secret_beta");
+
+		assert_eq!(a1, a2, "verify derives the exact same stand-in token as import");
+		assert_ne!(a1, b, "distinct refresh secrets derive distinct tokens");
+		assert!(a1.len() >= TOKEN_LENGTH, "passes Tuwunel's minimum token length");
+		assert!(!a1.contains("alpha"), "never leaks the raw refresh token");
 	}
 }
