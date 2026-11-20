@@ -160,26 +160,21 @@ async fn signatures(
 ) {
 	let signatures = &mut ctx.out.signatures;
 	match keys
-		.verify(ctx.services, served, &room.rules)
+		.verify(ctx.services, served, synapse, &room.rules)
 		.await
 	{
-		| Outcome::Verified => signatures.verified = signatures.verified.saturating_add(1),
-		| Outcome::Redacted => signatures.redacted = signatures.redacted.saturating_add(1),
-		| Outcome::Unverifiable(server) => {
+		| (Outcome::Verified, _) => signatures.verified = signatures.verified.saturating_add(1),
+		| (Outcome::Redacted, _) => signatures.redacted = signatures.redacted.saturating_add(1),
+		| (Outcome::Unverifiable(server), _) => {
 			signatures.unverifiable = signatures.unverifiable.saturating_add(1);
 			ctx.out.unverifiable_servers.insert(server);
 		},
-		| Outcome::Failed(e) => match keys
-			.verify(ctx.services, synapse, &room.rules)
-			.await
-		{
-			| Outcome::Failed(_) =>
-				ctx.out
-					.excuse("signatures", subject, format!("fails in Synapse too: {e}")),
-			| _ => {
-				signatures.failed = signatures.failed.saturating_add(1);
-				ctx.out.differs("signatures", subject, e);
-			},
+		| (Outcome::Failed(e), true) =>
+			ctx.out
+				.excuse("signatures", subject, format!("fails in Synapse too: {e}")),
+		| (Outcome::Failed(e), false) => {
+			signatures.failed = signatures.failed.saturating_add(1);
+			ctx.out.differs("signatures", subject, e);
 		},
 	}
 }

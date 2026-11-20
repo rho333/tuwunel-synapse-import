@@ -9,7 +9,7 @@ use tuwunel_matrix::room_version;
 use super::{
 	compare::{differing_fields, same_keys},
 	events::auth_events,
-	keys::{Outcome, classify, parse_key_json},
+	keys::{Keys, Outcome, classify, parse_key_json},
 	receipts::receipts,
 	report::Verification,
 	userdata::rule_actions,
@@ -189,4 +189,37 @@ fn push_rule_actions_normalize_or_explain() {
 
 	assert_eq!(rule_actions(Some("nope"), None), Err("Synapse stored invalid JSON"));
 	assert_eq!(rule_actions(Some("[]"), Some("{bad")), Err("Synapse stored invalid JSON"));
+}
+
+#[test]
+fn server_key_verification_catches_unimported_synapse_keys() {
+	let rules = room_version::rules(&RoomVersionId::V11).expect("v11 rules");
+	let pair = Ed25519KeyPair::from_der(&Ed25519KeyPair::generate(), "1".to_owned())
+		.expect("a key pair");
+	let mut event = object(json!({
+		"type": "m.room.message", "room_id": "!r:origin.test", "sender": "@a:origin.test",
+		"content": {"body": "hi"}, "depth": 1, "origin_server_ts": 1,
+		"auth_events": [], "prev_events": [],
+	}));
+	hash_and_sign_event("origin.test", &pair, &mut event, &rules.redaction).expect("signed");
+
+	let pubkey = Base64::new(pair.public_key().to_vec());
+
+	let mut neither = Keys::default();
+	assert_eq!(
+		neither.verify_loaded(&event, &event, &rules),
+		(Outcome::Unverifiable("origin.test".to_owned()), false),
+		"neither server holds the key"
+	);
+
+	neither.insert_synapse("origin.test", "ed25519:1".to_owned(), pubkey.clone());
+	let (outcome, excused) = neither.verify_loaded(&event, &event, &rules);
+	assert!(!excused);
+	assert!(
+		matches!(&outcome, Outcome::Failed(msg) if msg.contains("tuwunel lacks signing key")),
+		"missing imported key caught: {outcome:?}"
+	);
+
+	neither.insert_tuwunel("origin.test", "ed25519:1".to_owned(), pubkey);
+	assert_eq!(neither.verify_loaded(&event, &event, &rules), (Outcome::Verified, false));
 }
