@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use tuwunel_service::server_keys::read_synapse_key_file;
 
 use super::{
-	MUST_BE_EMPTY, auth_problem, schema_problem, server_name_problem, signing_key_problem,
-	target_problems, unfinished_problem,
+	MUST_BE_EMPTY, admin_room_problem, auth_problem, schema_problem, server_name_problem,
+	signing_key_problem, target_problems, unfinished_problem,
 };
 
 const SEED_A: &str = "TM0Imyj/ltqdtsNG7BFOD1uKMZ81q6Yk2oz27U+4pvs";
@@ -154,4 +154,12 @@ fn mas_is_refused_when_synapse_does_not_delegate() {
 #[test]
 fn the_pepper_is_ignored_with_mas() {
 	assert_eq!(auth_problem(true, true, None, Some("stale")), None);
+}
+
+#[test]
+fn admins_require_the_admin_room() {
+	assert_eq!(admin_room_problem(false, false), None);
+	assert_eq!(admin_room_problem(true, true), None);
+	let problem = admin_room_problem(true, false).expect("refused");
+	assert!(problem.contains("create_admin_room = true"), "{problem}");
 }

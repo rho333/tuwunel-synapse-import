@@ -42,7 +42,7 @@ pub(super) async fn check(
 	check_identity(services, config, &mut problem);
 	check_auth(services, config, mas, &mut problem).await?;
 	let schema = check_source(source, &mut problem).await?;
-	check_target(services, source, resuming, &mut problem).await?;
+	check_target(services, source, mas, resuming, &mut problem).await?;
 
 	if !problems.is_empty() {
 		return Err!("Cannot import from Synapse:\n- {}", problems.join("\n- "));
@@ -119,6 +119,7 @@ async fn check_source(source: &Source, problem: &mut impl FnMut(String)) -> Resu
 async fn check_target(
 	services: &Services,
 	source: &Source,
+	mas: Option<&Mas>,
 	resuming: bool,
 	problem: &mut impl FnMut(String),
 ) -> Result {
@@ -148,6 +149,18 @@ async fn check_target(
 		.count()
 		.await;
 
+	let has_admins = match mas {
+		| Some(mas) => mas.has_admins().await?,
+		| None =>
+			source
+				.count_where(
+					"users",
+					"WHERE (admin <> 0) IS TRUE AND NOT ((deactivated <> 0) IS TRUE) AND NOT \
+					 ((is_guest <> 0) IS TRUE)",
+				)
+				.await? > 0,
+	};
+
 	target_problems(
 		server_user,
 		taken,
@@ -155,6 +168,7 @@ async fn check_target(
 		non_internal_users.saturating_add(1),
 	)
 	.into_iter()
+	.chain(admin_room_problem(has_admins, services.config.create_admin_room))
 	.for_each(problem);
 
 	Ok(())
@@ -269,6 +283,14 @@ fn target_problems(server_user: &str, taken: bool, resuming: bool, users: usize)
 	}
 
 	problems
+}
+
+fn admin_room_problem(has_admins: bool, create_admin_room: bool) -> Option<String> {
+	(has_admins && !create_admin_room).then(|| {
+		"Synapse has admin users, which tuwunel grants through its admin room; enable \
+		 create_admin_room = true"
+			.into()
+	})
 }
 
 #[cfg(test)]

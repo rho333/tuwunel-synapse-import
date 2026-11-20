@@ -148,6 +148,17 @@ impl Mas {
 		users::check_schemes(self, services, problem).await
 	}
 
+	pub(super) async fn has_admins(&self) -> Result<bool> {
+		Ok(self
+			.source
+			.count_where(
+				"users",
+				"WHERE can_request_admin IS TRUE AND deactivated_at IS NULL AND NOT (is_guest \
+				 IS TRUE)",
+			)
+			.await? > 0)
+	}
+
 	/// Email addresses, shaped like the Synapse query `threepids` reads.
 	pub(super) async fn emails(&self, services: &Services) -> Result<Vec<Row>> {
 		let server_name = services.globals.server_name().as_str();
