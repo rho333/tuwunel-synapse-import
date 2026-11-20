@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::{Group, State, StateGroups, compress};
+use super::{CACHE_LIMIT, Group, State, StateGroups, compress};
 
 type Delta = Vec<(u64, u64)>;
 
@@ -112,4 +112,28 @@ fn cycle_in_state_group_edges_returns_an_error() {
 
 	let err = groups.state(1).unwrap_err();
 	assert!(err.to_string().contains("cycle"), "{err}");
+}
+
+#[test]
+fn cache_evicts_half_when_full() {
+	let limit = i64::try_from(CACHE_LIMIT).unwrap() + 4;
+	let mut raw = Vec::with_capacity(CACHE_LIMIT + 4);
+	for i in 1..=limit {
+		raw.push((i, (i > 1).then_some(i - 1), vec![(1, i.cast_unsigned())]));
+	}
+
+	let mut groups = StateGroups {
+		groups: raw
+			.into_iter()
+			.map(|(id, parent, delta)| (id, Group { parent, delta }))
+			.collect(),
+		event_groups: HashMap::new(),
+		cache: HashMap::new(),
+		dropped: 0,
+	};
+
+	for i in 1..=limit {
+		assert_eq!(groups.state(i).unwrap(), &state(&[(1, i.cast_unsigned())]));
+		assert!(groups.cache.len() <= CACHE_LIMIT);
+	}
 }

@@ -215,7 +215,15 @@ impl StateGroups {
 		if !self.cache.contains_key(&group) {
 			let state = self.build(group)?;
 			if self.cache.len() >= CACHE_LIMIT {
-				self.cache.clear();
+				let evict: Vec<i64> = self
+					.cache
+					.keys()
+					.take(CACHE_LIMIT / 2)
+					.copied()
+					.collect();
+				for key in evict {
+					self.cache.remove(&key);
+				}
 			}
 
 			self.cache.insert(group, state);
