@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use std::{iter::once, time::Duration};
+use std::{iter::once, sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use serde_json::json;
@@ -9,17 +9,18 @@ use tuwunel_core::{
 	ruma::{
 		OwnedEventId, RoomId, UserId, event_id,
 		events::{
-			StateEventType,
+			StateEventType, TimelineEventType,
 			room::{
 				member::{MembershipState, RoomMemberEventContent},
 				message::RoomMessageEventContent,
 			},
 		},
+		server_name, user_id,
 	},
 	utils::to_canonical_object,
 };
 use tuwunel_matrix::{PduEvent, event::Event, pdu::PduBuilder};
-use tuwunel_service::Services;
+use tuwunel_service::{Services, rooms::state_compressor::CompressedState};
 
 use self::{
 	client::{Client, poll_until, register},
@@ -230,14 +231,21 @@ async fn forward_extremities(services: &Services, room_id: &RoomId) -> Vec<Owned
 
 async fn exercise_resilience(services: &Services, base: &str) -> Result {
 	let creator_token = "import-resilience-creator-access-token";
+	let loser_token = "import-resilience-loser-access-token";
 	let creator_id = register(services, "resiliencecreator", creator_token).await?;
+	let fork_loser = register(services, "forkloser", loser_token).await?;
 	let creator = Client { services, base, token: creator_token };
+	let loser = Client { services, base, token: loser_token };
 
 	let room = creator
 		.create_room(&json!({ "preset": "public_chat" }))
 		.await?;
+	loser
+		.post(&format!("rooms/{room}/join"), &json!({}))
+		.await?;
 
-	exercise_malformed_and_redactions(services, &creator_id, &room).await
+	exercise_malformed_and_redactions(services, &creator_id, &room).await?;
+	exercise_sync_imported_state(services, &fork_loser, &room).await
 }
 
 async fn exercise_malformed_and_redactions(
@@ -328,6 +336,100 @@ async fn exercise_malformed_and_redactions(
 	assert!(
 		after_redact.get_content_as_value().get("body").is_none(),
 		"same-server federated redaction must redact target body during import"
+	);
+
+	Ok(())
+}
+
+async fn exercise_sync_imported_state(
+	services: &Services,
+	fork_loser: &UserId,
+	room: &RoomId,
+) -> Result {
+	let cur_state = services.state.get_room_shortstatehash(room).await?;
+	let prejoin_user = user_id!("@prejoin:remote.example");
+	let prejoin_event_id = event_id!("$prejoin_outlier_member");
+	let (_, prejoin_json) = raw_pdu(json!({
+		"event_id": prejoin_event_id,
+		"room_id": room,
+		"sender": prejoin_user,
+		"state_key": prejoin_user,
+		"origin_server_ts": 500,
+		"type": TimelineEventType::RoomMember,
+		"content": { "membership": "join" },
+		"prev_events": [],
+		"auth_events": [],
+		"depth": 1
+	}))?;
+	services
+		.timeline
+		.add_pdu_outlier(prejoin_event_id, &prejoin_json);
+
+	let mut full_state = CompressedState::new();
+	let entries: Vec<_> = services
+		.state_accessor
+		.state_full_ids(cur_state)
+		.collect()
+		.await;
+	let loser_key = services
+		.short
+		.get_or_create_shortstatekey(&StateEventType::RoomMember, fork_loser.as_str())
+		.await;
+	for (shortkey, eid) in entries {
+		if shortkey != loser_key {
+			full_state.insert(
+				services
+					.state_compressor
+					.compress_state_event(shortkey, &eid)
+					.await,
+			);
+		}
+	}
+	let prejoin_key = services
+		.short
+		.get_or_create_shortstatekey(&StateEventType::RoomMember, prejoin_user.as_str())
+		.await;
+	full_state.insert(
+		services
+			.state_compressor
+			.compress_state_event(prejoin_key, prejoin_event_id)
+			.await,
+	);
+
+	let full_state = Arc::new(full_state);
+	let saved = services
+		.state_compressor
+		.save_state(room, full_state.clone())
+		.await?;
+	let state_lock = services.state.mutex.lock(room).await;
+	services
+		.state
+		.sync_imported_state(room, saved.shortstatehash, &full_state, &state_lock)
+		.await?;
+	drop(state_lock);
+
+	assert_eq!(
+		services
+			.state_cache
+			.user_membership(prejoin_user, room)
+			.await,
+		Some(MembershipState::Join),
+		"pre-join remote outlier member populated into state_cache"
+	);
+	assert!(
+		services
+			.state_cache
+			.server_in_room(server_name!("remote.example"), room)
+			.await,
+		"remote server indexed for federation in state_cache"
+	);
+	assert_ne!(
+		services
+			.state_cache
+			.user_membership(fork_loser, room)
+			.await,
+		Some(MembershipState::Join),
+		"fork-loser absent from final state cleared from joined members"
 	);
 
 	Ok(())
