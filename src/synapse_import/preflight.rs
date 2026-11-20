@@ -40,8 +40,8 @@ pub(super) async fn check(
 	let mut problem = |p: String| problems.push(p);
 
 	check_identity(services, config, &mut problem);
-	check_auth(services, config, mas, &mut problem).await?;
-	let schema = check_source(source, &mut problem).await?;
+	check_auth(services, config, source, mas, &mut problem).await?;
+	let schema = check_source(source, mas, &mut problem).await?;
 	check_target(services, source, mas, resuming, &mut problem).await?;
 
 	if !problems.is_empty() {
@@ -66,6 +66,7 @@ fn check_identity(services: &Services, config: &SynapseConfig, problem: &mut imp
 async fn check_auth(
 	services: &Services,
 	config: &SynapseConfig,
+	source: &Source,
 	mas: Option<&Mas>,
 	problem: &mut impl FnMut(String),
 ) -> Result {
@@ -77,7 +78,7 @@ async fn check_auth(
 
 	if let Some(mas) = mas.filter(|_| config.delegates_auth()) {
 		mas.check(services, problem).await?;
-		if let Some(clients) = other_clients(&mas.source).await? {
+		if let Some(clients) = other_clients(&mas.source, source.pids()).await? {
 			problem(format!(
 				"other clients are connected to MAS's database ({clients}); stop MAS first"
 			));
@@ -88,7 +89,11 @@ async fn check_auth(
 }
 
 /// A supported, idle Synapse database; returns its schema version.
-async fn check_source(source: &Source, problem: &mut impl FnMut(String)) -> Result<i32> {
+async fn check_source(
+	source: &Source,
+	mas: Option<&Mas>,
+	problem: &mut impl FnMut(String),
+) -> Result<i32> {
 	if !source.has_table("schema_version").await? {
 		return Err!("--synapse-db is not a Synapse database: it has no schema_version table");
 	}
@@ -101,7 +106,10 @@ async fn check_source(source: &Source, problem: &mut impl FnMut(String)) -> Resu
 
 	problem_if(schema_problem(schema), problem);
 
-	if let Some(clients) = other_clients(source).await? {
+	let extra_pids = mas
+		.map(|mas| mas.source.pids().as_slice())
+		.unwrap_or(&[]);
+	if let Some(clients) = other_clients(source, extra_pids).await? {
 		problem(format!(
 			"other clients are connected to Synapse's database ({clients}); stop Synapse and \
 			 its workers first, or both servers will accept messages the other never sees"
@@ -181,13 +189,16 @@ fn problem_if(found: Option<String>, problem: &mut impl FnMut(String)) {
 }
 
 /// Who else is connected to the database, as "N from <client>" entries.
-async fn other_clients(source: &Source) -> Result<Option<String>> {
+async fn other_clients(source: &Source, extra_pids: &[i32]) -> Result<Option<String>> {
+	let mut own_pids = source.pids().clone();
+	own_pids.extend_from_slice(extra_pids);
+
 	let rows = source
 		.rows(
 			"SELECT count(*), coalesce(nullif(application_name, ''), host(client_addr), \
 			 'local') FROM pg_stat_activity WHERE datname = current_database() AND pid <> \
 			 ALL($1) AND backend_type = 'client backend' GROUP BY 2 ORDER BY 2",
-			&[source.pids()],
+			&[&own_pids],
 		)
 		.await?;
 
