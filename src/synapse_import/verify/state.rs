@@ -13,14 +13,17 @@ use super::{Ctx, rooms::Room};
 type State = BTreeMap<(String, String), String>;
 
 /// Why the import couldn't place an event Synapse has, as rooms/state.rs
-/// finds it: no state group, or a group whose ancestry is missing.
+/// finds it: no state group, a cycle in `state_group_edges`, or a group whose
+/// ancestry is missing.
 pub(super) async fn unplaceable(ctx: &Ctx<'_>, event_id: &str) -> Result<Option<String>> {
 	let rows = ctx
 		.source
 		.rows(
-			"WITH RECURSIVE chain(id) AS (SELECT state_group FROM event_to_state_groups WHERE \
-			 event_id = $1 UNION SELECT e.prev_state_group FROM chain JOIN state_group_edges e \
-			 ON e.state_group = chain.id) SELECT id, EXISTS (SELECT 1 FROM state_groups g WHERE \
+			"WITH RECURSIVE chain(id, path, cycle) AS (SELECT state_group, ARRAY[state_group], \
+			 FALSE FROM event_to_state_groups WHERE event_id = $1 UNION ALL SELECT \
+			 e.prev_state_group, chain.path || e.prev_state_group, e.prev_state_group = \
+			 ANY(chain.path) FROM chain JOIN state_group_edges e ON e.state_group = chain.id \
+			 WHERE NOT chain.cycle) SELECT id, cycle, EXISTS (SELECT 1 FROM state_groups g WHERE \
 			 g.id = chain.id) FROM chain",
 			&[&event_id],
 		)
@@ -30,9 +33,16 @@ pub(super) async fn unplaceable(ctx: &Ctx<'_>, event_id: &str) -> Result<Option<
 		return Ok(Some("Synapse doesn't record the state before it".to_owned()));
 	}
 
+	if let Some(row) = rows.iter().find(|row| row.get::<_, bool>(1)) {
+		return Ok(Some(format!(
+			"Synapse state_group_edges contains a cycle at group {}",
+			row.get::<_, i64>(0)
+		)));
+	}
+
 	Ok(rows
 		.iter()
-		.find(|row| !row.get::<_, bool>(1))
+		.find(|row| !row.get::<_, bool>(2))
 		.map(|row| {
 			format!("Synapse state group {} is referenced but missing", row.get::<_, i64>(0))
 		}))
