@@ -64,7 +64,9 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		};
 
 		info!("Importing room {room_id} ({} of {total})", i.saturating_add(1));
-		room::import(services, source, &room_id, &version, &erased, report).await?;
+		if !room::import(services, source, &room_id, &version, &erased, report).await? {
+			continue;
+		}
 
 		if row.get::<_, bool>(2) {
 			services.directory.set_public(&room_id, None);

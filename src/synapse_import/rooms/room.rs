@@ -27,7 +27,14 @@ pub(super) async fn import(
 	version: &RoomVersionId,
 	erased: &HashSet<OwnedUserId>,
 	report: &mut Report,
-) -> Result {
+) -> Result<bool> {
+	let state_rows = source
+		.rows(
+			"SELECT type, state_key, event_id FROM current_state_events WHERE room_id = $1",
+			&[&room_id.as_str()],
+		)
+		.await?;
+
 	let shortroomid = services
 		.short
 		.get_or_create_shortroomid(room_id)
@@ -36,12 +43,19 @@ pub(super) async fn import(
 	let skipped =
 		events::store_outliers(services, source, room_id, version, erased, report).await?;
 
+	if let Some(missing_critical) = unstored_critical_state(services, &state_rows).await {
+		report.skip(format!(
+			"room {room_id}: critical state {missing_critical} could not be imported"
+		));
+		return Ok(false);
+	}
+
 	let mut groups = StateGroups::load(services, source, room_id).await?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
 	append_timeline(services, source, room_id, version, &mut groups, &state_lock, report).await?;
 
-	let state = set_current_state(services, source, room_id, &state_lock).await?;
+	let state = set_current_state(services, room_id, &state_rows, &state_lock).await?;
 	let extremities =
 		set_forward_extremities(services, source, room_id, &skipped, &state_lock).await?;
 
@@ -58,7 +72,32 @@ pub(super) async fn import(
 	}
 
 	// After current state, so the room's power levels decide who could redact.
-	redactions::apply_late(services, source, room_id, shortroomid, &state_lock, report).await
+	redactions::apply_late(services, source, room_id, shortroomid, &state_lock, report).await?;
+
+	Ok(true)
+}
+
+async fn unstored_critical_state<'a>(
+	services: &Services,
+	rows: &'a [tokio_postgres::Row],
+) -> Option<&'a str> {
+	for row in rows {
+		let event_type: &str = row.get(0);
+		let state_key: &str = row.get(1);
+		let event_id: &str = row.get(2);
+		if state_key.is_empty() && matches!(event_type, "m.room.create" | "m.room.power_levels")
+		{
+			let Ok(id) = <&EventId>::try_from(event_id) else {
+				return Some(event_type);
+			};
+
+			if services.timeline.get_pdu_json(id).await.is_err() {
+				return Some(event_type);
+			}
+		}
+	}
+
+	None
 }
 
 /// Gives each timeline event the state before it, then appends it, or only
@@ -163,24 +202,17 @@ async fn append_timeline(
 /// the state other servers hold. Returns how many entries had an invalid ID.
 async fn set_current_state(
 	services: &Services,
-	source: &Source,
 	room_id: &RoomId,
+	rows: &[tokio_postgres::Row],
 	state_lock: &RoomMutexGuard,
 ) -> Result<usize> {
-	let rows = source
-		.rows(
-			"SELECT type, state_key, event_id FROM current_state_events WHERE room_id = $1",
-			&[&room_id.as_str()],
-		)
-		.await?;
-
 	if rows.is_empty() {
 		return Ok(0);
 	}
 
 	let mut dropped: usize = 0;
 	let mut state = CompressedState::new();
-	for row in &rows {
+	for row in rows {
 		let Ok(event_id) = <&EventId>::try_from(row.get::<_, &str>(2)) else {
 			dropped = dropped.saturating_add(1);
 			continue;
