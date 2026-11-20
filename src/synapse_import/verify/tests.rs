@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, RoomVersionId,
 	serde::{Base64, Raw},
@@ -12,7 +14,7 @@ use super::{
 	keys::{Outcome, classify, parse_key_json},
 	media::content_type_matches,
 	receipts::receipts,
-	report::Verification,
+	report::{Verification, summary_path},
 	userdata::rule_actions,
 };
 
@@ -190,6 +192,14 @@ fn push_rule_actions_normalize_or_explain() {
 
 	assert_eq!(rule_actions(Some("nope"), None), Err("Synapse stored invalid JSON"));
 	assert_eq!(rule_actions(Some("[]"), Some("{bad")), Err("Synapse stored invalid JSON"));
+}
+
+#[test]
+fn summary_path_avoids_overwriting_and_preserves_middle_dots() {
+	assert_eq!(summary_path(Path::new("verify.json")), Path::new("verify.txt"));
+	assert_eq!(summary_path(Path::new("verify.txt")), Path::new("verify.summary.txt"));
+	assert_eq!(summary_path(Path::new("verify.2026.04")), Path::new("verify.2026.04.txt"));
+	assert_eq!(summary_path(Path::new("verify")), Path::new("verify.txt"));
 }
 
 #[test]
