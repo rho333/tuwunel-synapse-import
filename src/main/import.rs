@@ -4,10 +4,10 @@
 
 use std::{io::ErrorKind, path::Path, sync::Arc, time::Duration};
 
-use tuwunel_core::{Err, Error, Result};
+use tuwunel_core::{Err, Error, Result, defer};
 use tuwunel_synapse_import::{self as synapse_import, Import, verify};
 
-use crate::{Args, Runtime, Server, async_run, async_start, async_stop};
+use crate::{Args, Runtime, Server, async_run, async_start, async_stop, signals};
 
 /// Runs the import the arguments ask for, if any. Returns whether one ran.
 pub fn exec_if_requested(server: &Arc<Server>, runtime: &Runtime, args: &Args) -> Result<bool> {
@@ -43,6 +43,15 @@ pub fn exec_if_requested(server: &Arc<Server>, runtime: &Runtime, args: &Args) -
 	let importing = !args.import_verify_only;
 	let verifying = args.import_verify || args.import_verify_only;
 	let outcome = runtime.block_on(async {
+		let signals = server
+			.server
+			.runtime()
+			.spawn(signals::enable(server.clone()));
+		let abort = signals.abort_handle();
+		defer! {{
+			abort.abort();
+		}}
+
 		let services = async_start(server).await?;
 		let imported = match importing {
 			| true => synapse_import::import(&services, &import)
@@ -58,8 +67,11 @@ pub fn exec_if_requested(server: &Arc<Server>, runtime: &Runtime, args: &Args) -
 
 		// RocksDB isn't closed cleanly at shutdown (leaked Database references), so
 		// unflushed memtables would make the first start replay the whole import.
-		if importing && imported.is_ok() && !args.import_dry_run {
-			services.db.engine.sort()?;
+		if importing && !args.import_dry_run {
+			match imported.is_ok() {
+				| true => services.db.engine.sort()?,
+				| false => services.db.engine.flush()?,
+			}
 		}
 
 		server.server.shutdown()?;
