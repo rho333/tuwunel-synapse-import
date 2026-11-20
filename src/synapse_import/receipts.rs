@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, pin::pin};
 
 use futures::TryStreamExt;
 use ruma::{
-	EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, UInt,
+	EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, RoomId, UInt,
 	events::receipt::{Receipt, ReceiptEvent, ReceiptEventContent, ReceiptThread, ReceiptType},
 };
 use tokio_postgres::Row;
@@ -49,13 +49,13 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 
 async fn import_receipt(services: &Services, row: &Row) -> Result {
 	let room_id = OwnedRoomId::try_from(row.get::<_, &str>(0)).map_err(|e| err!("{e}"))?;
+	if !services.metadata.exists(&room_id).await {
+		return Err!("the room wasn't imported");
+	}
+
 	let user_id = user_id(row, 2)?;
 	let event_id = OwnedEventId::try_from(row.get::<_, &str>(3)).map_err(|e| err!("{e}"))?;
-	let thread = match row.get::<_, Option<&str>>(5) {
-		| None => ReceiptThread::Unthreaded,
-		| Some("main") => ReceiptThread::Main,
-		| Some(root) => ReceiptThread::Thread(root.try_into().map_err(|e| err!("{e}"))?),
-	};
+	let thread = parse_receipt_thread(row.get(5))?;
 
 	let ts = receipt_ts(row.get(4))?;
 
@@ -79,7 +79,7 @@ async fn import_receipt(services: &Services, row: &Row) -> Result {
 				.await;
 		},
 		| "m.read.private" | "org.matrix.msc2285.read.private" => {
-			let count = event_count(services, &event_id).await?;
+			let count = event_count_in_room(services, &room_id, &event_id).await?;
 			services
 				.read_receipt
 				.private_read_set(PrivateRead {
@@ -99,6 +99,14 @@ async fn import_receipt(services: &Services, row: &Row) -> Result {
 	Ok(())
 }
 
+pub(super) fn parse_receipt_thread(thread_id: Option<&str>) -> Result<ReceiptThread> {
+	Ok(match thread_id {
+		| None => ReceiptThread::Unthreaded,
+		| Some("main") => ReceiptThread::Main,
+		| Some(root) => ReceiptThread::Thread(root.try_into().map_err(|e| err!("{e}"))?),
+	})
+}
+
 /// When the receipt was sent, from its `data` column.
 pub(super) fn receipt_ts(data: &str) -> Result<Option<MilliSecondsSinceUnixEpoch>> {
 	Ok(json(data)?
@@ -108,14 +116,29 @@ pub(super) fn receipt_ts(data: &str) -> Result<Option<MilliSecondsSinceUnixEpoch
 		.map(MilliSecondsSinceUnixEpoch))
 }
 
-async fn event_count(services: &Services, event_id: &EventId) -> Result<u64> {
+pub(super) async fn event_count_in_room(
+	services: &Services,
+	room_id: &RoomId,
+	event_id: &EventId,
+) -> Result<u64> {
+	let shortroomid = services
+		.short
+		.get_shortroomid(room_id)
+		.await
+		.map_err(|_| err!("the room wasn't imported"))?;
+
 	let pdu_id = services
 		.timeline
 		.get_pdu_id(event_id)
 		.await
 		.map_err(|_| err!("the event wasn't imported"))?;
 
-	match PduId::from(pdu_id).count {
+	let pdu_id = PduId::from(pdu_id);
+	if pdu_id.shortroomid != shortroomid {
+		return Err!("the event belongs to a different room");
+	}
+
+	match pdu_id.count {
 		| PduCount::Normal(count) => Ok(count),
 		| PduCount::Backfilled(_) => Err!("the event is backfilled"),
 	}
