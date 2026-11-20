@@ -27,20 +27,23 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 			continue;
 		};
 
-		let (state, status_msg): (&str, Option<String>) = (row.get(1), row.get(3));
-		let status_msg = status_msg.filter(|status| !status.is_empty());
-		if !services.globals.user_is_local(&user_id)
-			|| !services.users.is_active(&user_id).await
-			|| (state == "offline" && status_msg.is_none())
-		{
-			continue;
-		}
-
+		let state = row.get::<_, Option<&str>>(1).unwrap_or("offline");
+		let status_msg = row
+			.get::<_, Option<String>>(3)
+			.filter(|status| !status.is_empty());
 		let last_active_ago = row
 			.get::<_, Option<i64>>(2)
 			.filter(|&ts| ts > 0)
 			.and_then(|ts| UInt::try_from(ts).ok())
 			.map(|ts| now.saturating_sub(ts));
+
+		if !services.globals.user_is_local(&user_id)
+			|| !services.users.is_active(&user_id).await
+			|| (state == "offline" && status_msg.is_none())
+			|| (last_active_ago.is_none() && status_msg.is_none())
+		{
+			continue;
+		}
 
 		services
 			.presence
