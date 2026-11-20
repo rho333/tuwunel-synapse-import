@@ -32,7 +32,7 @@ const REQUIRED_COLUMNS: &[(&str, &[&str])] = &[
 		"is_guest",
 	]),
 	("user_passwords", &["user_id", "hashed_password", "version", "created_at"]),
-	("user_emails", &["user_id", "email", "created_at"]),
+	("user_emails", &["user_id", "email", "created_at", "confirmed_at"]),
 	("upstream_oauth_providers", &[
 		"upstream_oauth_provider_id",
 		"issuer",
@@ -148,16 +148,18 @@ impl Mas {
 		users::check_schemes(self, services, problem).await
 	}
 
-	/// Email addresses, shaped like the Synapse query `threepids` reads.
+	/// Confirmed email addresses, shaped like the Synapse query `threepids` reads.
 	pub(super) async fn emails(&self, services: &Services) -> Result<Vec<Row>> {
 		let server_name = services.globals.server_name().as_str();
-		let ms = "(extract(epoch FROM e.created_at) * 1000)::bigint";
+		let created_ms = "(extract(epoch FROM e.created_at) * 1000)::bigint";
+		let confirmed_ms = "(extract(epoch FROM e.confirmed_at) * 1000)::bigint";
 
 		self.source
 			.rows(
 				&format!(
-					"SELECT '@' || u.username || ':' || $1, 'email', e.email, {ms}, {ms} FROM \
-					 user_emails e JOIN users u USING (user_id) ORDER BY u.username"
+					"SELECT '@' || u.username || ':' || $1, 'email', e.email, {confirmed_ms}, \
+					 {created_ms} FROM user_emails e JOIN users u USING (user_id) WHERE \
+					 e.confirmed_at IS NOT NULL ORDER BY u.username"
 				),
 				&[&server_name],
 			)
