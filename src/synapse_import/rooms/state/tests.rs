@@ -107,6 +107,28 @@ fn predecessors_before_gives_up_on_disagreement_or_a_gap() {
 }
 
 #[test]
+fn auto_compressor_multi_hop_chain_uses_predecessor_group_over_parent() {
+	// G1: initial state (key 2 -> 20). G2: first update (key 2 -> 21).
+	// G3: synapse_auto_compressor re-pointed G3's parent directly at G1 with delta [(2, 22)].
+	let mut groups = state_groups([
+		(1, None, vec![(1, 10), (2, 20)]),
+		(2, Some(1), vec![(2, 21)]),
+		(3, Some(1), vec![(2, 22)]),
+	]);
+
+	assert_eq!(groups.parent_before(3, 2, 22), Some(1), "parent_before would pick stale G1");
+
+	let before = groups
+		.predecessors_before(3, 2, &[Some(2)])
+		.expect("predecessor group 2 is present");
+	assert_eq!(
+		before,
+		Some(compress(&state(&[(1, 10), (2, 21)]))),
+		"predecessors_before restores G2's state instead of stale G1"
+	);
+}
+
+#[test]
 fn cycle_in_state_group_edges_returns_an_error() {
 	let mut groups = state_groups([(1, Some(2), vec![(1, 10)]), (2, Some(1), vec![(2, 20)])]);
 
