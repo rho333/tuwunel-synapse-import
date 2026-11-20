@@ -34,16 +34,24 @@ impl Source {
 		let (client, first) = open(url).await?;
 		let (streams, second) = open(url).await?;
 
-		let snapshot: String = client
-			.query_one("SELECT pg_export_snapshot()", &[])
+		let in_recovery: bool = client
+			.query_one("SELECT pg_is_in_recovery()", &[])
 			.await
-			.map_err(|e| err!("Cannot share the Synapse database snapshot: {e}"))?
+			.map_err(|e| err!("Synapse query failed: {e}"))?
 			.get(0);
 
-		streams
-			.batch_execute(&format!("SET TRANSACTION SNAPSHOT '{snapshot}'"))
-			.await
-			.map_err(|e| err!("Cannot share the Synapse database snapshot: {e}"))?;
+		if !in_recovery {
+			let snapshot: String = client
+				.query_one("SELECT pg_export_snapshot()", &[])
+				.await
+				.map_err(|e| err!("Cannot share the Synapse database snapshot: {e}"))?
+				.get(0);
+
+			streams
+				.batch_execute(&format!("SET TRANSACTION SNAPSHOT '{snapshot}'"))
+				.await
+				.map_err(|e| err!("Cannot share the Synapse database snapshot: {e}"))?;
+		}
 
 		let mut pids = Vec::with_capacity(2);
 		for connection in [&client, &streams] {
