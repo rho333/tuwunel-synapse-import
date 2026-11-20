@@ -510,6 +510,11 @@ impl Service {
 			.deserialized()
 	}
 
+	/// Sets the authentication origin recorded for a user (`"password"`, `"sso"`, ...).
+	pub fn set_origin(&self, user_id: &UserId, origin: &str) {
+		self.db.userid_origin.insert(user_id, origin);
+	}
+
 	/// Returns whether the user has a password. Disabled accounts and
 	/// registrations setting a sentinel password will return false here.
 	pub async fn has_password(&self, user_id: &UserId) -> Result<bool> {
