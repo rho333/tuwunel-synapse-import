@@ -13,6 +13,7 @@ fn state_groups<const N: usize>(groups: [(i64, Option<i64>, Delta); N]) -> State
 			.into_iter()
 			.map(|(id, parent, delta)| (id, Group { parent, delta }))
 			.collect(),
+		event_groups: HashMap::new(),
 		cache: HashMap::new(),
 		dropped: 0,
 	}
