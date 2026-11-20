@@ -6,12 +6,12 @@ use ruma::{
 	api::client::push::set_pusher::v3::{PusherAction, PusherPostData},
 };
 use serde_json::{Value, json};
-use tuwunel_core::Result;
+use tuwunel_core::{Result, err};
 use tuwunel_service::Services;
 
 use super::{
 	Report, failpoint,
-	source::{Source, json, user_id},
+	source::{Source, user_id},
 };
 
 pub(super) async fn import(services: &Services, source: &Source, report: &mut Report) -> Result {
@@ -57,11 +57,12 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 			continue;
 		}
 
-		let data = row
-			.get::<_, Option<&str>>(10)
-			.map(json)
-			.transpose()
-			.map(|data| data.unwrap_or_else(|| Value::Object(Default::default())));
+		let raw_data = row
+			.try_get::<_, Option<&str>>(10)
+			.map(|s| s.map(str::as_bytes))
+			.or_else(|_| row.try_get::<_, Option<&[u8]>>(10))
+			.map_err(|e| err!("cannot read pusher data column: {e}"));
+		let data = raw_data.and_then(parse_pusher_data);
 
 		// A NULL lang fails to parse below, so the pusher is reported.
 		let pusher = data.and_then(|data| {
@@ -96,4 +97,31 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 	}
 
 	Ok(())
+}
+
+pub(super) fn parse_pusher_data(bytes: Option<&[u8]>) -> Result<Value> {
+	match bytes.filter(|b| !b.is_empty()) {
+		| Some(bytes) => serde_json::from_slice(bytes)
+			.map_err(|e| err!("Synapse stored invalid pusher data JSON: {e}")),
+		| None => Ok(Value::Object(Default::default())),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::parse_pusher_data;
+
+	#[test]
+	fn parse_pusher_data_decodes_bytea_json_and_empty_values() {
+		let parsed =
+			parse_pusher_data(Some(br#"{"url":"https://push.example/_matrix/push/v1/notify"}"#))
+				.expect("valid JSON bytes");
+		assert_eq!(parsed, json!({"url": "https://push.example/_matrix/push/v1/notify"}));
+
+		assert_eq!(parse_pusher_data(None).unwrap(), json!({}));
+		assert_eq!(parse_pusher_data(Some(b"")).unwrap(), json!({}));
+		parse_pusher_data(Some(b"\xFFnot-json")).unwrap_err();
+	}
 }
