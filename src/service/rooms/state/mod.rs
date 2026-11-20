@@ -10,7 +10,7 @@ mod prune;
 mod tests;
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	fmt::Write,
 	iter::once,
 	ops::Bound::{Excluded, Unbounded},
@@ -33,7 +33,8 @@ pub(crate) use prune::prune_goal;
 /// behavior.
 pub use prune::{PruneSummary, Trigger};
 use ruma::{
-	CanonicalJsonObject, EventId, OwnedEventId, OwnedRoomId, RoomId, RoomVersionId, UserId,
+	CanonicalJsonObject, EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, RoomVersionId,
+	UserId,
 	events::{
 		AnyStrippedStateEvent, StateEventType, TimelineEventType,
 		room::{
@@ -167,6 +168,124 @@ pub async fn force_state(
 ) -> Result {
 	self.prepare_force_state(room_id, &statediffnew, state_lock)
 		.await?;
+
+	self.install_force_state(room_id, shortstatehash, state_lock);
+
+	Ok(())
+}
+
+/// Installs an imported room's authoritative current state and reconciles all
+/// membership and participating-server caches against it.
+///
+/// Unlike [`Self::force_state`], which replays only a delta from the previous
+/// snapshot, this walks the full `state` so pre-join outlier members are added
+/// and any timeline fork-losers absent from `state` are cleared.
+#[implement(Service)]
+pub async fn sync_imported_state(
+	&self,
+	room_id: &RoomId,
+	shortstatehash: u64,
+	state: &CompressedState,
+	state_lock: &RoomMutexGuard,
+) -> Result {
+	let members: Vec<PduEvent> = state
+		.iter()
+		.stream()
+		.map(|&entry| parse_compressed_state_event(entry).1)
+		.wide_filter_map(async |shorteventid| {
+			let event_id: OwnedEventId = self
+				.services
+				.short
+				.get_eventid_from_short(shorteventid)
+				.inspect_err(inspect_debug_log)
+				.await
+				.ok()?;
+
+			let pdu = self
+				.services
+				.timeline
+				.get_pdu(&event_id)
+				.await
+				.ok()?;
+
+			(pdu.kind == TimelineEventType::RoomMember).then_some(pdu)
+		})
+		.collect()
+		.await;
+
+	let mut present: HashSet<OwnedUserId> = HashSet::with_capacity(members.len());
+	for pdu in &members {
+		let Some(user_id) = pdu
+			.state_key
+			.as_deref()
+			.map(<&UserId>::try_from)
+			.flat_ok()
+		else {
+			continue;
+		};
+
+		let Ok(membership_event): Result<RoomMemberEventContent> = pdu.get_content() else {
+			continue;
+		};
+
+		present.insert(user_id.to_owned());
+		let last_state = match membership_event.membership {
+			| MembershipState::Invite if self.services.globals.user_is_local(user_id) => self
+				.replayed_invite_state(room_id, user_id, pdu)
+				.await?,
+			| MembershipState::Knock
+				if self.services.globals.user_is_local(user_id)
+					&& self
+						.services
+						.state_cache
+						.knock_state(user_id, room_id)
+						.await
+						.is_err() =>
+				Some(self.summary_stripped(pdu).await),
+			| _ => None,
+		};
+
+		let count = self.services.globals.next_count();
+		self.services
+			.state_cache
+			.update_imported_membership(MembershipUpdate {
+				room_id,
+				user_id,
+				membership_event,
+				sender: &pdu.sender,
+				last_state,
+				invite_via: None,
+				update_joined_count: false,
+				count: PduCount::Normal(*count),
+			})
+			.await?;
+	}
+
+	// Clear any timeline membership from a losing fork whose user has no member
+	// event at all in the room's resolved current state.
+	let cached: Vec<OwnedUserId> = self
+		.services
+		.state_cache
+		.room_members(room_id)
+		.chain(self.services.state_cache.room_members_invited(room_id))
+		.chain(self.services.state_cache.room_members_knocked(room_id))
+		.map(ToOwned::to_owned)
+		.collect()
+		.await;
+
+	for user_id in cached {
+		if !present.contains(&user_id) {
+			let count = self.services.globals.next_count();
+			self.services
+				.state_cache
+				.mark_as_left(&user_id, room_id, PduCount::Normal(*count));
+		}
+	}
+
+	self.services
+		.state_cache
+		.update_joined_count(room_id)
+		.await;
 
 	self.install_force_state(room_id, shortstatehash, state_lock);
 
