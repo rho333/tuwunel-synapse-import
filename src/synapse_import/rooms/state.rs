@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures::TryStreamExt;
-use ruma::{OwnedEventId, RoomId, events::StateEventType};
+use ruma::{OwnedEventId, RoomId, RoomVersionId, events::StateEventType};
 use tuwunel_core::{Err, Result};
 use tuwunel_matrix::{Event as _, PduEvent};
 use tuwunel_service::{
@@ -133,14 +133,16 @@ impl StateGroups {
 	/// The state before `pdu`, from `group` (the state after it, or before it
 	/// when `soft_failed`).
 	///
-	/// Synapse stores a state event's group as the state before it plus the
-	/// event, so that parent group is the answer. Failing that, as across a
-	/// backfill gap, the event's key is set back to what its predecessors'
-	/// groups agree on.
+	/// Predecessors' state groups come first so delta-compression trees (such as
+	/// `synapse_auto_compressor`) can't substitute a distant ancestor group when
+	/// the same `(type, state_key)` changed twice. Fork merges whose predecessors
+	/// disagree run state resolution; `parent_before` is used only across a gap
+	/// where a predecessor has no recorded state group.
 	pub(super) async fn before(
 		&mut self,
 		services: &Services,
-		_source: &Source,
+		room_id: &RoomId,
+		room_version: &RoomVersionId,
 		pdu: &PduEvent,
 		group: Option<i64>,
 		soft_failed: bool,
@@ -168,12 +170,23 @@ impl StateGroups {
 			.get_or_create_shorteventid(pdu.event_id())
 			.await;
 
+		let prevs = self.prev_groups(pdu);
+		if let Some(before) = self.predecessors_before(after, key, &prevs)? {
+			return Ok(Some(before));
+		}
+
+		if prevs.len() > 1 && prevs.iter().all(Option::is_some) {
+			return services
+				.event_handler
+				.resolve_state_at_pdu(pdu, room_id, room_version)
+				.await;
+		}
+
 		if let Some(parent) = self.parent_before(after, key, event) {
 			return self.state(parent).map(compress).map(Some);
 		}
 
-		let prevs = self.prev_groups(pdu);
-		self.predecessors_before(after, key, &prevs)
+		Ok(None)
 	}
 
 	/// The parent of group `after` when its delta is just `key` set to `event`.

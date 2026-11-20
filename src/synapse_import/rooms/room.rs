@@ -39,7 +39,7 @@ pub(super) async fn import(
 	let mut groups = StateGroups::load(services, source, room_id).await?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
-	append_timeline(services, source, room_id, &mut groups, &state_lock, report).await?;
+	append_timeline(services, source, room_id, version, &mut groups, &state_lock, report).await?;
 
 	let state = set_current_state(services, source, room_id, &state_lock).await?;
 	let extremities =
@@ -67,6 +67,7 @@ async fn append_timeline(
 	services: &Services,
 	source: &Source,
 	room_id: &RoomId,
+	room_version: &RoomVersionId,
 	groups: &mut StateGroups,
 	state_lock: &RoomMutexGuard,
 	report: &mut Report,
@@ -111,7 +112,7 @@ async fn append_timeline(
 			.await?;
 
 		let before = groups
-			.before(services, source, &pdu, state_group, soft_failed)
+			.before(services, room_id, room_version, &pdu, state_group, soft_failed)
 			.await
 			.and_then(|before| {
 				before.ok_or_else(|| err!("Synapse doesn't record the state before it"))
