@@ -1,5 +1,6 @@
+use futures::StreamExt;
 use ruma::{
-	CanonicalJsonValue, OwnedUserId,
+	CanonicalJsonValue, OwnedUserId, UserId,
 	api::{
 		IncomingRequest,
 		client::uiaa::{AuthData, AuthFlow, AuthType, Jwt, UiaaInfo},
@@ -7,9 +8,9 @@ use ruma::{
 };
 use serde_json::{json, value::to_raw_value};
 use tuwunel_core::{
-	Err, Error, Result, err, is_equal_to, utils,
+	Err, Error, Result, err, utils,
 	utils::{
-		OptionExt,
+		OptionExt, ReadyExt,
 		future::{OptionFutureExt, TryExtExt},
 	},
 };
@@ -63,7 +64,8 @@ where
 	let sso_flow = [AuthType::Sso];
 	let bound_idp: Option<String> = sender_user
 		.map_async(async |sender_user| {
-			body.sender_device
+			let device_idp = body
+				.sender_device
 				.as_deref()
 				.map_async(async |device_id| {
 					services
@@ -73,17 +75,21 @@ where
 						.filter(|s| !s.is_empty())
 				})
 				.await
-				.flatten()
-				.or_else(|| {
-					let use_sso = user_origin
-						.as_deref()
-						.is_some_and(is_equal_to!("sso"))
-						&& services.config.identity_provider.len() == 1;
+				.flatten();
 
-					use_sso
-						.then(|| services.oauth.providers.get_default_id())
-						.flatten()
-				})
+			if device_idp.is_some() {
+				return device_idp;
+			}
+
+			if user_origin.as_deref() != Some("sso") {
+				return None;
+			}
+
+			if services.config.identity_provider.len() == 1 {
+				return services.oauth.providers.get_default_id();
+			}
+
+			unique_session_idp(services, sender_user).await
 		})
 		.await
 		.flatten();
@@ -182,4 +188,21 @@ where
 			| _ => Err!(Request(NotJson("JSON body is not valid"))),
 		},
 	}
+}
+
+/// Resolves the single unambiguous `idp_id` across a user's OAuth sessions
+/// (such as an imported SSO association on a multi-provider server).
+async fn unique_session_idp(services: &Services, user_id: &UserId) -> Option<String> {
+	let idps: Vec<String> = services
+		.oauth
+		.sessions
+		.get_by_user(user_id)
+		.ready_filter_map(|session| session.ok()?.idp_id.filter(|s| !s.is_empty()))
+		.collect()
+		.await;
+
+	let first = idps.first()?;
+	idps.iter()
+		.all(|idp| idp == first)
+		.then(|| first.clone())
 }
