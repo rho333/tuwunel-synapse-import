@@ -266,8 +266,24 @@ async fn devices(ctx: &mut Ctx<'_>) -> Result {
 			.cloned()
 			.unwrap_or_default();
 		for device_id in want.difference(&have) {
-			ctx.out
-				.missing("devices", format!("{user_id} {device_id}"), "no such device");
+			if services
+				.users
+				.is_cross_signing_key_id(&user_id, device_id.as_str())
+				.await
+				.unwrap_or(false)
+			{
+				if let Some(set) = ctx.devices.get_mut(&user_id) {
+					set.remove(device_id);
+				}
+				ctx.out.excuse(
+					"devices",
+					format!("{user_id} {device_id}"),
+					"device ID matches a cross-signing key ID",
+				);
+			} else {
+				ctx.out
+					.missing("devices", format!("{user_id} {device_id}"), "no such device");
+			}
 		}
 
 		for device_id in have.difference(&want) {
