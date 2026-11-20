@@ -12,10 +12,10 @@ use tuwunel_service::{Services, server_keys::read_synapse_key_file};
 
 use super::{config::SynapseConfig, mas::Mas, source::Source};
 
-/// Synapse 1.100 through 1.163, the releases this import is tested against.
+/// Synapse 1.100 through 1.166, the releases this import is tested against.
 /// Columns added in between are checked by name (`Source::column_or`), not by
 /// this number.
-const SUPPORTED_SCHEMA: RangeInclusive<i32> = 84..=94;
+const SUPPORTED_SCHEMA: RangeInclusive<i32> = 84..=95;
 
 /// Tables that must be empty: work Synapse accepted but hadn't finished.
 const MUST_BE_EMPTY: [(&str, &str); 3] = [

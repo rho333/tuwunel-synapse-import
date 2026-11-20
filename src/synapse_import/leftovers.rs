@@ -92,6 +92,11 @@ const LEFTOVERS: &[(&str, &str, &str)] = &[
 		"WHERE enabled",
 		"per-user experimental features",
 	),
+	(
+		"server_announcement_rooms",
+		"",
+		"server announcement room bindings (the rooms themselves are imported)",
+	),
 ];
 
 pub(super) async fn report(source: &Source, mas: Option<&Mas>, report: &mut Report) -> Result {
