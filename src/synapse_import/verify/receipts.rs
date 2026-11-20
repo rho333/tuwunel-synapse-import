@@ -4,12 +4,17 @@
 use std::{collections::BTreeSet, pin::pin};
 
 use futures::{StreamExt, TryStreamExt};
-use ruma::{OwnedRoomId, RoomId, UserId, events::AnySyncEphemeralRoomEvent, serde::Raw};
+use ruma::{
+	EventId, OwnedRoomId, RoomId, UserId, events::AnySyncEphemeralRoomEvent, serde::Raw,
+};
 use serde_json::Value;
 use tuwunel_core::Result;
 
 use super::{
-	super::{receipts::receipt_ts, source::user_id},
+	super::{
+		receipts::{event_count_in_room, parse_receipt_thread, receipt_ts},
+		source::user_id,
+	},
 	Ctx,
 };
 
@@ -56,7 +61,27 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 			},
 		};
 
+		if !ctx.services.metadata.exists(room_id).await {
+			ctx.out
+				.excuse(DOMAIN, subject, "the room wasn't imported");
+			continue;
+		}
+
+		let (Ok(id), Ok(_)) = (<&EventId>::try_from(event_id), parse_receipt_thread(thread))
+		else {
+			ctx.out
+				.excuse(DOMAIN, subject, "invalid event or thread ID");
+			continue;
+		};
+
 		if let Err(e) = receipt_ts(row.get(5)) {
+			ctx.out.excuse(DOMAIN, subject, e);
+			continue;
+		}
+
+		if kind == "m.read.private"
+			&& let Err(e) = event_count_in_room(ctx.services, room_id, id).await
+		{
 			ctx.out.excuse(DOMAIN, subject, e);
 			continue;
 		}
