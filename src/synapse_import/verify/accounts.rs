@@ -215,6 +215,12 @@ async fn devices(ctx: &mut Ctx<'_>) -> Result {
 		};
 
 		let device_id: &str = row.get(1);
+		if device_id.is_empty() {
+			ctx.out
+				.excuse("devices", format!("{user_id} <empty>"), "empty device ID");
+			continue;
+		}
+
 		if device_id.len() > MAX_DEVICE_ID_LENGTH {
 			ctx.out
 				.excuse("devices", format!("{user_id} {device_id}"), "device ID too long");

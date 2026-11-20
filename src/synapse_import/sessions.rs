@@ -97,6 +97,11 @@ async fn import_device(
 		| token => token,
 	};
 
+	if device_id.as_str().is_empty() {
+		report.skip(format!("{user_id}: empty device ID"));
+		return;
+	}
+
 	if !services
 		.users
 		.device_exists(user_id, device_id)
@@ -209,16 +214,20 @@ async fn import_dehydrated(services: &Services, source: &Source, report: &mut Re
 	Ok(())
 }
 
-/// The newest access token of each device. Tokens a server admin uses to act as
-/// someone else (`puppets_user_id`) are not sessions of that user.
+/// The newest access token of each device, plus unconsumed refresh tokens whose
+/// short-lived access token Synapse already reaped. Tokens a server admin uses
+/// to act as someone else (`puppets_user_id`) are not sessions of that user.
 pub(super) async fn latest_tokens(source: &Source, report: &mut Report) -> Result<Tokens> {
+	let now_ms: i64 = MilliSecondsSinceUnixEpoch::now().get().into();
 	let rows = source
 		.rows(
 			"SELECT DISTINCT ON (a.user_id, a.device_id) a.user_id, a.device_id, a.token, \
-			 a.valid_until_ms, r.token FROM access_tokens a LEFT JOIN refresh_tokens r ON r.id \
-			 = a.refresh_token_id WHERE a.device_id IS NOT NULL AND a.puppets_user_id IS NULL \
-			 ORDER BY a.user_id, a.device_id, a.id DESC",
-			&[],
+			 a.valid_until_ms, CASE WHEN r.next_token_id IS NULL AND coalesce(r.expiry_ts > \
+			 $1, true) AND coalesce(r.ultimate_session_expiry_ts > $1, true) THEN r.token END \
+			 FROM access_tokens a LEFT JOIN refresh_tokens r ON r.id = a.refresh_token_id \
+			 WHERE a.device_id IS NOT NULL AND a.puppets_user_id IS NULL ORDER BY a.user_id, \
+			 a.device_id, a.id DESC",
+			&[&now_ms],
 		)
 		.await?;
 
@@ -235,6 +244,33 @@ pub(super) async fn latest_tokens(source: &Source, report: &mut Report) -> Resul
 			refresh: row.get(4),
 			oidc: false,
 		});
+	}
+
+	let refresh_only = source
+		.rows(
+			"SELECT DISTINCT ON (r.user_id, r.device_id) r.user_id, r.device_id, r.token FROM \
+			 refresh_tokens r WHERE r.next_token_id IS NULL AND coalesce(r.expiry_ts > $1, \
+			 true) AND coalesce(r.ultimate_session_expiry_ts > $1, true) ORDER BY r.user_id, \
+			 r.device_id, r.id DESC",
+			&[&now_ms],
+		)
+		.await?;
+
+	for row in refresh_only {
+		let Some(user_id) = report.keep("refresh_tokens", user_id(&row, 0)) else {
+			continue;
+		};
+
+		let device_id: OwnedDeviceId = row.get::<_, String>(1).into();
+		let refresh: String = row.get(2);
+		tokens
+			.entry((user_id, device_id))
+			.or_insert_with(|| Token {
+				token: standin_access_token(&refresh),
+				valid_until_ms: Some(0),
+				refresh: Some(refresh),
+				oidc: false,
+			});
 	}
 
 	Ok(tokens)
