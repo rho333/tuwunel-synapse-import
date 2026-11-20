@@ -110,7 +110,12 @@ async fn link(
 		.await?;
 
 	match adoption {
-		| Adoption::Adopted | Adoption::AlreadyBound => Report::count(&mut report.sso),
+		| Adoption::Adopted | Adoption::AlreadyBound => {
+			if !services.users.has_password(user_id).await.unwrap_or(false) {
+				services.users.set_origin(user_id, "sso");
+			}
+			Report::count(&mut report.sso);
+		},
 		| Adoption::Absent =>
 			report.skip(format!("{user_id}: no local account to link their {issuer} identity to")),
 		| Adoption::Collision => report.skip(format!(
