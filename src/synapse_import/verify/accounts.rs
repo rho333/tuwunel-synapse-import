@@ -5,7 +5,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use futures::StreamExt;
 use ruma::{OwnedDeviceId, OwnedUserId, UserId};
-use tuwunel_core::Result;
+use tuwunel_core::{
+	Result,
+	utils::hash::{is_argon2_hash, is_bcrypt_hash},
+};
 use tuwunel_service::{
 	profile::MAX_PROFILE_SIZE,
 	users::device::{MAX_DEVICE_ID_LENGTH, TOKEN_LENGTH},
@@ -80,8 +83,19 @@ async fn users(ctx: &mut Ctx<'_>) -> Result {
 
 		if !auth.deactivated {
 			ctx.active.insert(user_id.clone());
+			let want_password = auth
+				.password_hash
+				.as_deref()
+				.filter(|hash| !hash.is_empty())
+				.is_some_and(|hash| is_argon2_hash(hash) || is_bcrypt_hash(hash));
+			let have_password = services
+				.users
+				.has_password(&user_id)
+				.await
+				.unwrap_or(false);
 			let (suspended, ..): (bool, bool, bool) = (row.get(6), row.get(7), row.get(8));
 			let flags = [
+				("password", want_password, have_password),
 				("admin", auth.admin, services.admin.user_is_admin(&user_id).await),
 				("locked", auth.locked, services.users.is_locked(&user_id).await),
 				("suspended", suspended, services.users.is_suspended(&user_id).await),
