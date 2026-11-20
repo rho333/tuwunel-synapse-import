@@ -7,14 +7,15 @@ use serde_json::json;
 use tuwunel_core::{
 	Result,
 	ruma::{
-		OwnedEventId, RoomId, UserId,
+		OwnedEventId, RoomId, UserId, event_id,
 		events::room::{
 			member::{MembershipState, RoomMemberEventContent},
 			message::RoomMessageEventContent,
 		},
 	},
+	utils::to_canonical_object,
 };
-use tuwunel_matrix::{event::Event, pdu::PduBuilder};
+use tuwunel_matrix::{PduEvent, event::Event, pdu::PduBuilder};
 use tuwunel_service::Services;
 
 use self::{
@@ -170,7 +171,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	);
 	assert_eq!(membership(&imported_invitee).await, Some(MembershipState::Invite));
 
-	Ok(())
+	exercise_resilience(services, base).await
 }
 
 /// Append an event as history imported from another server, then make it the
@@ -222,4 +223,83 @@ async fn forward_extremities(services: &Services, room_id: &RoomId) -> Vec<Owned
 		.map(ToOwned::to_owned)
 		.collect()
 		.await
+}
+
+async fn exercise_resilience(services: &Services, base: &str) -> Result {
+	let creator_token = "import-resilience-creator-access-token";
+	register(services, "resiliencecreator", creator_token).await?;
+	let creator = Client { services, base, token: creator_token };
+
+	let room = creator
+		.create_room(&json!({ "preset": "public_chat" }))
+		.await?;
+
+	exercise_redactions(services, &room).await
+}
+
+async fn exercise_redactions(services: &Services, room: &RoomId) -> Result {
+	let remote_msg_id = event_id!("$remote_msg_to_redact");
+	append_raw_imported(services, room, json!({
+		"event_id": remote_msg_id,
+		"room_id": room,
+		"sender": "@user:remote.example",
+		"origin_server_ts": 1000,
+		"type": "m.room.message",
+		"content": { "msgtype": "m.text", "body": "secret text" },
+		"prev_events": [],
+		"auth_events": [],
+		"depth": 10
+	}))
+	.await?;
+
+	append_raw_imported(services, room, json!({
+		"event_id": "$remote_mod_redaction",
+		"room_id": room,
+		"sender": "@mod:remote.example",
+		"origin_server_ts": 1001,
+		"type": "m.room.redaction",
+		"redacts": remote_msg_id,
+		"content": { "redacts": remote_msg_id },
+		"prev_events": [remote_msg_id],
+		"auth_events": [],
+		"depth": 11
+	}))
+	.await?;
+
+	let after_redact = services.timeline.get_pdu(remote_msg_id).await?;
+	assert!(
+		after_redact.get_content_as_value().get("body").is_none(),
+		"same-server federated redaction must redact target body during import"
+	);
+
+	Ok(())
+}
+
+async fn append_raw_imported(
+	services: &Services,
+	room: &RoomId,
+	value: serde_json::Value,
+) -> Result {
+	let (pdu, pdu_json) = raw_pdu(value)?;
+	let state_lock = services.state.mutex.lock(room).await;
+	services.state.append_to_state(&pdu).await?;
+	services
+		.timeline
+		.append_imported_pdu(&pdu, pdu_json, &state_lock)
+		.await?;
+
+	Ok(())
+}
+
+fn raw_pdu(
+	mut value: serde_json::Value,
+) -> Result<(PduEvent, tuwunel_core::ruma::CanonicalJsonObject)> {
+	value.as_object_mut().unwrap().insert(
+		"hashes".to_owned(),
+		json!({ "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+	);
+	let canonical = to_canonical_object(&value)?;
+	let pdu: PduEvent = serde_json::from_value(value)?;
+
+	Ok((pdu, canonical))
 }

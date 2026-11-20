@@ -376,7 +376,7 @@ async fn append_pdu_effects(
 				&& self
 					.services
 					.state_accessor
-					.user_can_redact(redacts_id, pdu.sender(), pdu.room_id(), false)
+					.user_can_redact(redacts_id, pdu.sender(), pdu.room_id(), !delivery.is_live())
 					.await?
 			{
 				self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
