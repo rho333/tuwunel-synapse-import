@@ -43,6 +43,10 @@ impl crate::Service for Service {
 	}
 
 	async fn worker(self: Arc<Self>) -> Result {
+		if self.services.db.is_read_only() {
+			return Ok(());
+		}
+
 		loop {
 			let retention_seconds = self.services.config.redaction_retention_seconds;
 
