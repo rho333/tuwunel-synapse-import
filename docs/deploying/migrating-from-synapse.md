@@ -12,7 +12,7 @@ MAS's database and config too. Synapse's databases are only read.
 
 ## Requirements
 
-- Synapse 1.100 to 1.163 (database schema 84 to 94). Upgrade an older Synapse
+- Synapse 1.100 to 1.166 (database schema 84 to 95). Upgrade an older Synapse
   first, and let it finish its background updates.
 - PostgreSQL. A SQLite Synapse can be ported first with Synapse's
   `synapse_port_db`. The connection to it is not encrypted, so run the import
@@ -49,7 +49,12 @@ These settings keep Synapse's behaviour:
 Copy or mount Synapse's media store and any appservice registration files
 where `homeserver.yaml` says they are, or edit a copy of `homeserver.yaml` to
 point at them. Relative paths in it are read from the directory the import
-runs in, as Synapse reads them from its own working directory.
+runs in, as Synapse reads them from its own working directory. Appservice
+registrations listed in `homeserver.yaml` are imported directly into Tuwunel's
+database (normalizing legacy `de.sorunome.msc2409.push_ephemeral` flags to
+`receive_ephemeral`), so do **not** also load those same registrations via
+`appservice_dir` or `[global.appservice]` in `tuwunel.toml` (doing both would
+register duplicate appservice IDs at startup).
 
 ## 2. Rehearse
 
@@ -158,10 +163,8 @@ store, a quarantined file) are excused rather than counted missing. Every
 mismatch is listed with what it concerns, and any mismatch makes the run
 exit with an error.
 
-Events in rooms of version 1 and 2 reference earlier events with hashes that
-Tuwunel doesn't store, so their signatures can't be re-checked from
-Tuwunel's copy; those are listed as excused. Events signed by a server whose
-key neither database holds are counted as unverifiable.
+Events signed by a server whose key neither database holds are counted as
+unverifiable.
 
 ## With MAS: keep its hostname
 
@@ -176,15 +179,24 @@ server {
     server_name auth.example.com;   # MAS's public hostname
     location = /.well-known/openid-configuration {
         proxy_pass http://tuwunel/.well-known/openid-configuration;
+        sub_filter_types application/json;
+        sub_filter_once on;
+        sub_filter '"issuer":"https://matrix.example.com/"' '"issuer":"https://auth.example.com/"';
     }
-    location = /oauth2/token  { proxy_pass http://tuwunel/_tuwunel/oidc/token; }
-    location = /oauth2/revoke { proxy_pass http://tuwunel/_tuwunel/oidc/revoke; }
+    location = /oauth2/keys.json    { proxy_pass http://tuwunel/_tuwunel/oidc/jwks; }
+    location = /oauth2/auth         { proxy_pass http://tuwunel/_tuwunel/oidc/authorize; }
+    location = /oauth2/token        { proxy_pass http://tuwunel/_tuwunel/oidc/token; }
+    location = /oauth2/revoke       { proxy_pass http://tuwunel/_tuwunel/oidc/revoke; }
+    location = /oauth2/userinfo     { proxy_pass http://tuwunel/_tuwunel/oidc/userinfo; }
+    location = /oauth2/registration { proxy_pass http://tuwunel/_tuwunel/oidc/register; }
+    location /account               { proxy_pass http://tuwunel/_tuwunel/oidc/account; }
     location / { return 404; }
 }
 ```
 
-Older Element Web never forgets the address it logged in with, so keep this
-until those clients have upgraded or logged in again.
+Older Element Web (`oidc-client-ts`) validates that the discovery document's
+`issuer` matches the `auth.example.com` origin it logged in against, and never
+forgets that address until those clients upgrade or log in again.
 
 ## What stays behind
 
@@ -196,8 +208,13 @@ The report lists each of these it finds:
 
 - Events Tuwunel can't store: old-room events with floats in their content,
   and rooms on a version Tuwunel doesn't support.
-- Phone numbers (Tuwunel binds email only), shadow bans, per-user rate limit
-  overrides, event, room and user reports, and unsent delayed events.
+- Phone numbers (Tuwunel binds email only), email pushers, shadow bans,
+  per-user rate limit overrides, event, room and user reports, and unsent
+  delayed events. Accounts pending admin approval (`approved = false`) are
+  imported locked.
+- Deviceless or hidden static access tokens (such as manually inserted
+  double-puppet tokens with no visible device): use MSC4190 appservice login or
+  create a normal device token after cutover.
 - To-device messages Synapse hadn't yet delivered to other servers, and
   deactivations it hadn't finished, whose users may still be in rooms.
 - Synapse's cache of remote users' devices (`device_lists_remote_cache`),
