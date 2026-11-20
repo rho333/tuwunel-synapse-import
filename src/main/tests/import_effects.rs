@@ -232,7 +232,7 @@ async fn forward_extremities(services: &Services, room_id: &RoomId) -> Vec<Owned
 async fn exercise_resilience(services: &Services, base: &str) -> Result {
 	let creator_token = "import-resilience-creator-access-token";
 	let loser_token = "import-resilience-loser-access-token";
-	let _creator_id = register(services, "resiliencecreator", creator_token).await?;
+	let creator_id = register(services, "resiliencecreator", creator_token).await?;
 	let fork_loser = register(services, "forkloser", loser_token).await?;
 	let creator = Client { services, base, token: creator_token };
 	let loser = Client { services, base, token: loser_token };
@@ -244,11 +244,66 @@ async fn exercise_resilience(services: &Services, base: &str) -> Result {
 		.post(&format!("rooms/{room}/join"), &json!({}))
 		.await?;
 
-	exercise_redactions(services, &room).await?;
+	exercise_malformed_and_redactions(services, &creator_id, &room).await?;
 	exercise_sync_imported_state(services, &fork_loser, &room).await
 }
 
-async fn exercise_redactions(services: &Services, room: &RoomId) -> Result {
+async fn exercise_malformed_and_redactions(
+	services: &Services,
+	creator_id: &UserId,
+	room: &RoomId,
+) -> Result {
+	let orphan_thread: PduBuilder = serde_json::from_value(json!({
+		"type": "m.room.message",
+		"content": {
+			"msgtype": "m.text",
+			"body": "reply to missing root",
+			"m.relates_to": {
+				"rel_type": "m.thread",
+				"event_id": "$missing_thread_root_event"
+			}
+		}
+	}))?;
+	import_pdu(services, creator_id, room, orphan_thread).await?;
+
+	append_raw_imported(services, room, json!({
+		"event_id": "$malformed_member_state_key",
+		"room_id": room,
+		"sender": creator_id,
+		"state_key": "not-a-valid-mxid",
+		"origin_server_ts": 999,
+		"type": "m.room.member",
+		"content": { "membership": "join" },
+		"prev_events": [],
+		"auth_events": [],
+		"depth": 9
+	}))
+	.await?;
+
+	let bad_body: PduBuilder = serde_json::from_value(json!({
+		"type": "m.room.message",
+		"content": { "msgtype": "m.text", "body": 12345 }
+	}))?;
+	import_pdu(services, creator_id, room, bad_body).await?;
+
+	let create_pdu = services
+		.state_accessor
+		.room_state_get(room, &StateEventType::RoomCreate, "")
+		.await?;
+	append_raw_imported(services, room, json!({
+		"event_id": "$redact_create_attempt",
+		"room_id": room,
+		"sender": creator_id,
+		"origin_server_ts": 1000,
+		"type": "m.room.redaction",
+		"redacts": create_pdu.event_id(),
+		"content": { "redacts": create_pdu.event_id() },
+		"prev_events": [],
+		"auth_events": [],
+		"depth": 9
+	}))
+	.await?;
+
 	let remote_msg_id = event_id!("$remote_msg_to_redact");
 	append_raw_imported(services, room, json!({
 		"event_id": remote_msg_id,

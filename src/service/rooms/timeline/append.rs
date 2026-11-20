@@ -372,15 +372,22 @@ async fn append_pdu_effects(
 
 			let redacts_id = pdu.redacts_id(&room_rules);
 
-			if let Some(redacts_id) = &redacts_id
-				&& self
+			if let Some(redacts_id) = &redacts_id {
+				let allowed = match self
 					.services
 					.state_accessor
 					.user_can_redact(redacts_id, pdu.sender(), pdu.room_id(), !delivery.is_live())
-					.await?
-			{
-				self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
-					.await?;
+					.await
+				{
+					| Ok(allowed) => allowed,
+					| Err(_) if !delivery.is_live() => false,
+					| Err(e) => return Err(e),
+				};
+
+				if allowed {
+					self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
+						.await?;
+				}
 			}
 		},
 		| TimelineEventType::RoomMember =>
@@ -425,10 +432,15 @@ async fn append_pdu_effects(
 				}
 			},
 			| Relation::Thread(thread) => {
-				self.services
+				let added = self
+					.services
 					.threads
 					.add_to_thread(&thread.event_id, pdu_id, pdu)
-					.await?;
+					.await;
+
+				if delivery.is_live() {
+					added?;
+				}
 			},
 			| Relation::Replacement(replacement) => {
 				self.services
@@ -477,8 +489,18 @@ async fn append_member_effects(
 		return Ok(());
 	};
 
-	let user_id = UserId::parse(state_key).expect("This state_key was previously validated");
-	let content: RoomMemberEventContent = pdu.get_content()?;
+	let user_id = match <&UserId>::try_from(state_key) {
+		| Ok(user_id) => user_id,
+		| Err(_) if !delivery.is_live() => return Ok(()),
+		| Err(e) => panic!("This state_key was previously validated: {e}"),
+	};
+
+	let content: RoomMemberEventContent = match pdu.get_content() {
+		| Ok(content) => content,
+		| Err(_) if !delivery.is_live() => return Ok(()),
+		| Err(e) => return Err(e),
+	};
+
 	let is_invite = content.membership == MembershipState::Invite;
 	let is_direct = content.is_direct;
 
@@ -496,7 +518,7 @@ async fn append_member_effects(
 		.state_cache
 		.update_membership(MembershipUpdate {
 			room_id: pdu.room_id(),
-			user_id: &user_id,
+			user_id,
 			membership_event: content,
 			sender: pdu.sender(),
 			last_state: stripped_state,
@@ -509,7 +531,7 @@ async fn append_member_effects(
 	if is_invite && delivery.is_live() {
 		self.services
 			.membership
-			.auto_accept(pdu.room_id(), &user_id, pdu.sender(), is_direct);
+			.auto_accept(pdu.room_id(), user_id, pdu.sender(), is_direct);
 	}
 
 	Ok(())
@@ -528,7 +550,11 @@ async fn append_message_effects(
 	shortroomid: ShortRoomId,
 	delivery: Delivery,
 ) -> Result {
-	let content: ExtractBody = pdu.get_content()?;
+	let content: ExtractBody = match pdu.get_content() {
+		| Ok(content) => content,
+		| Err(_) if !delivery.is_live() => return Ok(()),
+		| Err(e) => return Err(e),
+	};
 	let Some(body) = content.body else {
 		return Ok(());
 	};
