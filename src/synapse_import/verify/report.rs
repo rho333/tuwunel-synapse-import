@@ -3,8 +3,9 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
+	ffi::OsString,
 	fmt::{Display, Write as _},
-	path::Path,
+	path::{Path, PathBuf},
 };
 
 use serde::Serialize;
@@ -179,11 +180,12 @@ impl Verification {
 	/// Writes the JSON to `path` and the summary beside it, as `.txt`.
 	pub fn write(&self, path: &Path) -> Result {
 		let json = serde_json::to_vec_pretty(self).expect("the verification serializes");
-		let cannot =
-			|e: std::io::Error| err!("Cannot write the verification to {}: {e}", path.display());
+		std::fs::write(path, json)
+			.map_err(|e| err!("Cannot write the verification to {}: {e}", path.display()))?;
 
-		std::fs::write(path, json).map_err(cannot)?;
-		std::fs::write(path.with_extension("txt"), self.summary()).map_err(cannot)
+		let txt = summary_path(path);
+		std::fs::write(&txt, self.summary())
+			.map_err(|e| err!("Cannot write the verification to {}: {e}", txt.display()))
 	}
 
 	pub fn log(&self) {
@@ -262,5 +264,22 @@ impl Verification {
 		};
 
 		out
+	}
+}
+
+pub(super) fn summary_path(path: &Path) -> PathBuf {
+	match path
+		.extension()
+		.and_then(|ext| ext.to_str())
+		.map(str::to_ascii_lowercase)
+		.as_deref()
+	{
+		| Some("json") => path.with_extension("txt"),
+		| Some("txt") => path.with_extension("summary.txt"),
+		| _ => {
+			let mut os = OsString::from(path.as_os_str());
+			os.push(".txt");
+			PathBuf::from(os)
+		},
 	}
 }
