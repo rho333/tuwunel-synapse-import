@@ -334,6 +334,7 @@ impl Data {
 
 			let content_type = parts
 				.next()
+				.filter(|bytes| !bytes.is_empty())
 				.map(string_from_bytes)
 				.transpose()
 				.map_err(|e| err!(Database(error!(?mxc, "Content-type is invalid: {e}"))))?;
