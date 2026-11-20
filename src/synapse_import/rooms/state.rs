@@ -189,6 +189,11 @@ impl StateGroups {
 		Ok(None)
 	}
 
+	/// The compressed state of `group` itself (the state after an event).
+	pub(super) fn after(&mut self, group: i64) -> Result<CompressedState> {
+		self.state(group).map(compress)
+	}
+
 	/// The parent of group `after` when its delta is just `key` set to `event`.
 	fn parent_before(&self, after: i64, key: ShortStateKey, event: ShortEventId) -> Option<i64> {
 		self.groups
