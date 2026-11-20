@@ -198,9 +198,21 @@ async fn backend_pid(client: &Client) -> Result<i32> {
 }
 
 pub(super) fn user_id(row: &Row, idx: usize) -> Result<OwnedUserId> {
-	let name: String = row.get(idx);
+	let Some(name) = row.get::<_, Option<String>>(idx) else {
+		return Err!("Synapse user column is NULL");
+	};
 
 	UserId::parse(name.as_str())
+		.map_err(|e| err!("Synapse user {name:?} is not a valid user ID: {e}"))
+}
+
+pub(super) fn opt_user_id(row: &Row, idx: usize) -> Result<Option<OwnedUserId>> {
+	let Some(name) = row.get::<_, Option<String>>(idx) else {
+		return Ok(None);
+	};
+
+	UserId::parse(name.as_str())
+		.map(Some)
 		.map_err(|e| err!("Synapse user {name:?} is not a valid user ID: {e}"))
 }
 
