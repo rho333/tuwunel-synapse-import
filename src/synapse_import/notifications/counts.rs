@@ -21,7 +21,8 @@ use super::super::{
 /// timeline.
 const COUNTS: &str = "
 WITH receipts AS (
-	SELECT * FROM receipts_linearized WHERE receipt_type IN ('m.read', 'm.read.private')
+	SELECT * FROM receipts_linearized
+	WHERE receipt_type IN ('m.read', 'm.read.private', 'org.matrix.msc2285.read.private')
 ), unthreaded AS (
 	SELECT m.user_id, m.room_id,
 		COALESCE(
@@ -37,16 +38,19 @@ WITH receipts AS (
 	WHERE r.thread_id IS NOT NULL AND r.event_stream_ordering > u.read_upto
 	GROUP BY r.user_id, r.room_id, r.thread_id
 ), summarised AS (
-	SELECT s.user_id, s.room_id, s.thread_id, s.notif_count
+	SELECT s.user_id, s.room_id, COALESCE(s.thread_id, 'main') AS thread_id,
+		SUM(s.notif_count)::bigint AS notif_count
 	FROM event_push_summary s JOIN unthreaded u USING (user_id, room_id)
-	LEFT JOIN threaded t USING (user_id, room_id, thread_id)
+	LEFT JOIN threaded t ON t.user_id = s.user_id AND t.room_id = s.room_id
+		AND t.thread_id = COALESCE(s.thread_id, 'main')
 	WHERE (
 		(s.last_receipt_stream_ordering IS NULL
 			AND s.stream_ordering > COALESCE(t.read_upto, u.read_upto))
 		OR s.last_receipt_stream_ordering = COALESCE(t.read_upto, u.read_upto)
 	) AND (s.notif_count != 0 OR COALESCE(s.unread_count, 0) != 0)
+	GROUP BY s.user_id, s.room_id, COALESCE(s.thread_id, 'main')
 ), actions AS (
-	SELECT a.user_id, a.room_id, a.thread_id,
+	SELECT a.user_id, a.room_id, COALESCE(a.thread_id, 'main') AS thread_id,
 		COUNT(*) FILTER (WHERE a.notif = 1
 			AND a.stream_ordering > COALESCE(t.read_upto, u.read_upto)) AS unread,
 		COUNT(*) FILTER (WHERE a.highlight = 1
@@ -54,10 +58,11 @@ WITH receipts AS (
 		COUNT(*) FILTER (WHERE a.notif = 1 AND a.stream_ordering >
 			(SELECT stream_ordering FROM event_push_summary_stream_ordering)) AS since_rollup
 	FROM event_push_actions a JOIN unthreaded u USING (user_id, room_id)
-	LEFT JOIN threaded t USING (user_id, room_id, thread_id)
-	GROUP BY a.user_id, a.room_id, a.thread_id
+	LEFT JOIN threaded t ON t.user_id = a.user_id AND t.room_id = a.room_id
+		AND t.thread_id = COALESCE(a.thread_id, 'main')
+	GROUP BY a.user_id, a.room_id, COALESCE(a.thread_id, 'main')
 )
-SELECT user_id, room_id, COALESCE(thread_id, 'main'),
+SELECT user_id, room_id, thread_id,
 	CASE WHEN s.notif_count IS NOT NULL THEN s.notif_count + COALESCE(a.since_rollup, 0)
 		ELSE a.unread END,
 	COALESCE(a.highlights, 0)
@@ -71,8 +76,9 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 			continue;
 		}
 
-		match import_counts(services, &row, counts) {
-			| Ok(()) => Report::count(&mut report.unread_counts),
+		match import_counts(services, &row, counts).await {
+			| Ok(true) => Report::count(&mut report.unread_counts),
+			| Ok(false) => {},
 			| Err(e) => report.skip(format!(
 				"{}'s unread counts in {}: {e}",
 				row.get::<_, &str>(0),
@@ -84,16 +90,24 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 	Ok(())
 }
 
-fn import_counts(services: &Services, row: &Row, counts: (u64, u64)) -> Result {
+async fn import_counts(services: &Services, row: &Row, counts: (u64, u64)) -> Result<bool> {
 	let user_id = user_id(row, 0)?;
+	if !services.users.is_active(&user_id).await {
+		return Ok(false);
+	}
+
 	let room_id = OwnedRoomId::try_from(row.get::<_, &str>(1)).map_err(|e| err!("{e}"))?;
+	if !services.metadata.exists(&room_id).await {
+		return Ok(false);
+	}
+
 	let thread_root = thread_root(row.get(2))?;
 
 	services
 		.pusher
 		.import_unread_counts(&user_id, &room_id, thread_root.as_deref(), counts);
 
-	Ok(())
+	Ok(true)
 }
 
 /// Synapse's thread ID, which names the main timeline `main`.
