@@ -233,7 +233,9 @@ async fn import_profiles(services: &Services, source: &Source, report: &mut Repo
 			report.keep(format_args!("{user_id} displayname"), set);
 		}
 
-		let avatar_url: Option<String> = row.get(2);
+		let avatar_url = row
+			.get::<_, Option<String>>(2)
+			.filter(|url| !url.is_empty());
 		if let Some(avatar_url) = avatar_url {
 			let avatar_url = OwnedMxcUri::from(avatar_url);
 			let set = services
