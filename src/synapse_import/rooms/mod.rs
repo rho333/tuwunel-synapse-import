@@ -11,11 +11,19 @@ mod tests;
 
 use std::collections::HashSet;
 
-use ruma::{OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomVersionId};
+use ruma::{
+	OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomVersionId, UserId,
+	events::{
+		AnyStrippedStateEvent,
+		room::member::{MembershipState, RoomMemberEventContent},
+	},
+	serde::Raw,
+};
+use serde_json::Value;
 use tokio_postgres::Row;
 use tuwunel_core::{Result, err, info};
-use tuwunel_matrix::room_version;
-use tuwunel_service::Services;
+use tuwunel_matrix::{PduCount, room_version};
+use tuwunel_service::{Services, rooms::state_cache::MembershipUpdate};
 
 pub(crate) use self::events::{convert, soft_failed, timeline};
 use super::{
@@ -81,6 +89,7 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		Report::count(&mut report.rooms);
 	}
 
+	import_pending_invites(services, source, report).await?;
 	import_aliases(services, source, report).await?;
 	forgotten::import(services, source, report).await
 }
@@ -138,4 +147,92 @@ async fn import_alias(services: &Services, row: &Row) -> Result {
 	services
 		.alias
 		.set_alias_by(&alias, &room_id, &creator)
+}
+
+/// Pending invites and knocks for local users in remote rooms where this server
+/// has no joined member (stored as outliers with stripped state in `unsigned`).
+async fn import_pending_invites(
+	services: &Services,
+	source: &Source,
+	report: &mut Report,
+) -> Result {
+	if !source.has_table("local_current_membership").await? {
+		return Ok(());
+	}
+
+	let rows = source
+		.rows(
+			"SELECT m.room_id, m.user_id, m.membership, j.json FROM local_current_membership m \
+			 JOIN event_json j USING (event_id) WHERE m.membership IN ('invite', 'knock') ORDER \
+			 BY m.room_id, m.user_id",
+			&[],
+		)
+		.await?;
+
+	for row in rows {
+		let result = import_pending_invite(services, &row).await;
+		report.keep(
+			format_args!("pending {} in {}", row.get::<_, &str>(2), row.get::<_, &str>(0)),
+			result,
+		);
+	}
+
+	Ok(())
+}
+
+async fn import_pending_invite(services: &Services, row: &Row) -> Result {
+	let room_id = OwnedRoomId::try_from(row.get::<_, &str>(0)).map_err(|e| err!("{e}"))?;
+	let user_id = user_id(row, 1)?;
+	if !services.users.is_active(&user_id).await {
+		return Ok(());
+	}
+
+	let target_state = match row.get::<_, &str>(2) {
+		| "invite" => MembershipState::Invite,
+		| "knock" => MembershipState::Knock,
+		| _ => return Ok(()),
+	};
+
+	if services
+		.state_cache
+		.user_membership(&user_id, &room_id)
+		.await
+		== Some(target_state.clone())
+	{
+		return Ok(());
+	}
+
+	let event: Value = serde_json::from_str(row.get(3)).map_err(|e| err!("invalid JSON: {e}"))?;
+	let sender_str = event
+		.get("sender")
+		.and_then(Value::as_str)
+		.ok_or_else(|| err!("missing sender"))?;
+	let sender = UserId::parse(sender_str).map_err(|e| err!("invalid sender: {e}"))?;
+	let content: RoomMemberEventContent = event
+		.get("content")
+		.cloned()
+		.ok_or_else(|| err!("missing content"))
+		.and_then(|c| serde_json::from_value(c).map_err(|e| err!("invalid member content: {e}")))?;
+
+	let stripped = event
+		.get("unsigned")
+		.and_then(|u| u.get("invite_room_state").or_else(|| u.get("knock_room_state")))
+		.and_then(|s| serde_json::from_value::<Vec<Raw<AnyStrippedStateEvent>>>(s.clone()).ok());
+
+	let invite_via = (target_state == MembershipState::Invite)
+		.then(|| vec![sender.server_name().to_owned()]);
+	let count = services.globals.next_count();
+	services
+		.state_cache
+		.update_imported_membership(MembershipUpdate {
+			room_id: &room_id,
+			user_id: &user_id,
+			membership_event: content,
+			sender: &sender,
+			last_state: stripped,
+			invite_via,
+			update_joined_count: false,
+			count: PduCount::Normal(*count),
+		})
+		.await
 }
