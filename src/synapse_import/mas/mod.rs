@@ -136,11 +136,19 @@ impl Mas {
 			.source
 			.count_where("oauth2_sessions", "WHERE finished_at IS NULL AND user_id IS NOT NULL")
 			.await?;
+		let public_clients = self
+			.source
+			.count_where(
+				"oauth2_clients",
+				"WHERE coalesce(token_endpoint_auth_method, 'none') = 'none'",
+			)
+			.await?;
 
-		if services.oauth.server.is_none() && live_sessions > 0 {
+		if services.oauth.server.is_none() && (live_sessions > 0 || public_clients > 0) {
 			problem(
-				"tuwunel's OAuth server is off, so MAS's OAuth sessions would have nowhere to \
-				 go; configure well_known.client and an identity_provider or oidc_native_auth"
+				"tuwunel's OAuth server is off, so MAS's OAuth sessions and clients would have \
+				 nowhere to go; configure well_known.client and an identity_provider or \
+				 oidc_native_auth"
 					.into(),
 			);
 		}

@@ -12,6 +12,12 @@ pub(in super::super) async fn import(
 	report: &mut Report,
 ) -> Result {
 	let Some(server) = &services.oauth.server else {
+		let skipped = mas.source.count("oauth2_clients").await?;
+		if skipped > 0 {
+			report.skip(format!(
+				"{skipped} MAS OAuth clients not imported because tuwunel's OAuth server is off"
+			));
+		}
 		return Ok(());
 	};
 
