@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures::TryStreamExt;
-use ruma::{EventId, RoomId, events::StateEventType};
+use ruma::{OwnedEventId, RoomId, events::StateEventType};
 use tuwunel_core::{Err, Result};
 use tuwunel_matrix::{Event as _, PduEvent};
 use tuwunel_service::{
@@ -33,6 +33,7 @@ const CACHE_LIMIT: usize = 64;
 
 pub(super) struct StateGroups {
 	groups: HashMap<i64, Group>,
+	event_groups: HashMap<OwnedEventId, i64>,
 	cache: HashMap<i64, State>,
 
 	/// State entries left out because their event ID is invalid.
@@ -55,6 +56,7 @@ impl StateGroups {
 	) -> Result<Self> {
 		let mut groups = Self {
 			groups: load_edges(source, room_id).await?,
+			event_groups: load_event_groups(source, room_id).await?,
 			cache: HashMap::new(),
 			dropped: 0,
 		};
@@ -84,8 +86,9 @@ impl StateGroups {
 		);
 
 		let mut keys: HashMap<(String, String), ShortStateKey> = HashMap::new();
+		let mut events: HashMap<OwnedEventId, ShortEventId> = HashMap::new();
 		while let Some(row) = rows.try_next().await? {
-			let Ok(event_id) = <&EventId>::try_from(row.get::<_, &str>(3)) else {
+			let Ok(event_id) = OwnedEventId::try_from(row.get::<_, &str>(3)) else {
 				self.dropped = self.dropped.saturating_add(1);
 				continue;
 			};
@@ -106,10 +109,16 @@ impl StateGroups {
 				},
 			};
 
-			let event = services
-				.short
-				.get_or_create_shorteventid(event_id)
-				.await;
+			let event = match events.entry(event_id) {
+				| Entry::Occupied(entry) => *entry.get(),
+				| Entry::Vacant(entry) => {
+					let short = services
+						.short
+						.get_or_create_shorteventid(entry.key())
+						.await;
+					*entry.insert(short)
+				},
+			};
 
 			self.groups
 				.entry(row.get(0))
@@ -131,7 +140,7 @@ impl StateGroups {
 	pub(super) async fn before(
 		&mut self,
 		services: &Services,
-		source: &Source,
+		_source: &Source,
 		pdu: &PduEvent,
 		group: Option<i64>,
 	) -> Result<Option<CompressedState>> {
@@ -158,7 +167,7 @@ impl StateGroups {
 			return self.state(parent).map(compress).map(Some);
 		}
 
-		let prevs = prev_groups(source, pdu).await?;
+		let prevs = self.prev_groups(pdu);
 		self.predecessors_before(after, key, &prevs)
 	}
 
@@ -242,6 +251,12 @@ impl StateGroups {
 
 		Ok(state)
 	}
+
+	fn prev_groups(&self, pdu: &PduEvent) -> Vec<Option<i64>> {
+		pdu.prev_events()
+			.map(|prev| self.event_groups.get(prev).copied())
+			.collect()
+	}
 }
 
 async fn load_edges(source: &Source, room_id: &RoomId) -> Result<HashMap<i64, Group>> {
@@ -263,23 +278,28 @@ async fn load_edges(source: &Source, room_id: &RoomId) -> Result<HashMap<i64, Gr
 	Ok(groups)
 }
 
-/// The group of each of `pdu`'s predecessors, where Synapse recorded one.
-async fn prev_groups(source: &Source, pdu: &PduEvent) -> Result<Vec<Option<i64>>> {
-	let prevs: Vec<&str> = pdu.prev_events().map(EventId::as_str).collect();
-	let groups: HashMap<String, i64> = source
-		.rows(
-			"SELECT event_id, state_group FROM event_to_state_groups WHERE event_id = ANY($1)",
-			&[&prevs],
-		)
-		.await?
-		.iter()
-		.map(|row| (row.get(0), row.get(1)))
-		.collect();
+async fn load_event_groups(
+	source: &Source,
+	room_id: &RoomId,
+) -> Result<HashMap<OwnedEventId, i64>> {
+	let mut rows = pin!(
+		source
+			.stream(
+				"SELECT e.event_id, g.state_group FROM events e JOIN event_to_state_groups g \
+				 USING (event_id) WHERE e.room_id = $1",
+				&[&room_id.as_str()],
+			)
+			.await?
+	);
 
-	Ok(prevs
-		.iter()
-		.map(|prev| groups.get(*prev).copied())
-		.collect())
+	let mut event_groups = HashMap::new();
+	while let Some(row) = rows.try_next().await? {
+		if let Ok(event_id) = OwnedEventId::try_from(row.get::<_, &str>(0)) {
+			event_groups.insert(event_id, row.get(1));
+		}
+	}
+
+	Ok(event_groups)
 }
 
 fn compress(state: &State) -> CompressedState {
