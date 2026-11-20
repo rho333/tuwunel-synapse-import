@@ -156,7 +156,9 @@ impl Service {
 
 		let appservice_user = &registration_info.sender;
 
-		if !self.services.users.exists(appservice_user).await {
+		if !self.services.db.is_read_only()
+			&& !self.services.users.exists(appservice_user).await
+		{
 			self.services
 				.users
 				.create(appservice_user, None, None)
