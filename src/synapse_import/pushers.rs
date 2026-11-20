@@ -36,6 +36,14 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		}
 
 		let pushkey: &str = row.get(2);
+		let kind: &str = row.get(4);
+		if kind == "email" {
+			report.skip(format!(
+				"{user_id} pusher {pushkey}: email pushers aren't supported by tuwunel"
+			));
+			continue;
+		}
+
 		let device_id = row
 			.get::<_, Option<String>>(1)
 			.map(OwnedDeviceId::from);
@@ -49,6 +57,9 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 			.device_exists(&user_id, &device_id)
 			.await
 		{
+			report.skip(format!(
+				"{user_id} pusher {pushkey}: its device {device_id} wasn't imported"
+			));
 			continue;
 		}
 
@@ -67,12 +78,12 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		let pusher = data.and_then(|data| {
 			Ok(serde_json::from_value::<PusherPostData>(json!({
 				"pushkey": pushkey,
-				"kind": row.get::<_, &str>(4),
+				"kind": kind,
 				"app_id": row.get::<_, &str>(5),
 				"app_display_name": row.get::<_, &str>(6),
 				"device_display_name": row.get::<_, &str>(7),
 				"lang": row.get::<_, Option<&str>>(8),
-				"profile_tag": row.get::<_, Option<&str>>(9),
+				"profile_tag": row.get::<_, Option<&str>>(9).filter(|tag| !tag.is_empty()),
 				"data": data,
 			}))?)
 		});
