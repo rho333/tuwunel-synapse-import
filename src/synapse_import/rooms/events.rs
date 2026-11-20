@@ -63,9 +63,13 @@ pub(super) async fn store_outliers(
 		let event_id: &str = row.get(0);
 		match convert(room_id, event_id, row.get(1), version, &rules, erased) {
 			| Ok((pdu, json)) => {
-				services
-					.timeline
-					.add_pdu_outlier(pdu.event_id(), &json);
+				// On `--import-resume`, leave already-appended timeline PDUs alone so
+				// an unredacted outlier copy can't shadow `pduid_pdu`.
+				if services.timeline.get_pdu_id(pdu.event_id()).await.is_err() {
+					services
+						.timeline
+						.add_pdu_outlier(pdu.event_id(), &json);
+				}
 
 				if row.get::<_, bool>(2) {
 					Report::count(&mut report.outliers);
