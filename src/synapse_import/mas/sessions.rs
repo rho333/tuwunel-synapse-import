@@ -23,7 +23,8 @@ const COMPAT: &str = "FROM compat_sessions s JOIN users u USING (user_id) LEFT J
                       a ON true LEFT JOIN LATERAL (SELECT refresh_token FROM \
                       compat_refresh_tokens WHERE compat_session_id = s.compat_session_id AND \
                       consumed_at IS NULL ORDER BY created_at DESC LIMIT 1) r ON true WHERE \
-                      s.finished_at IS NULL AND s.device_id IS NOT NULL";
+                      s.finished_at IS NULL AND s.device_id IS NOT NULL ORDER BY s.created_at \
+                      ASC, s.compat_session_id ASC";
 
 /// OAuth 2.0 sessions (`mat_`/`mar_`); the device is a scope.
 const OAUTH: &str =
@@ -35,7 +36,8 @@ const OAUTH: &str =
 	 = s.oauth2_session_id AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1) a ON true \
 	 LEFT JOIN LATERAL (SELECT refresh_token FROM oauth2_refresh_tokens WHERE oauth2_session_id \
 	 = s.oauth2_session_id AND consumed_at IS NULL AND revoked_at IS NULL ORDER BY created_at \
-	 DESC LIMIT 1) r ON true WHERE s.finished_at IS NULL";
+	 DESC LIMIT 1) r ON true WHERE s.finished_at IS NULL ORDER BY s.created_at ASC, \
+	 s.oauth2_session_id ASC";
 
 pub(in super::super) async fn tokens(
 	mas: &Mas,
