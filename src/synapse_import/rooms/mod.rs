@@ -103,7 +103,7 @@ async fn import_aliases(services: &Services, source: &Source, report: &mut Repor
 		.await?;
 
 	for row in rows {
-		match import_alias(services, &row) {
+		match import_alias(services, &row).await {
 			| Ok(()) => Report::count(&mut report.aliases),
 			| Err(e) => report.skip(format!("alias {}: {e}", row.get::<_, &str>(0))),
 		}
@@ -114,7 +114,7 @@ async fn import_aliases(services: &Services, source: &Source, report: &mut Repor
 
 /// An alias without a recorded creator is the server's. A Synapse room
 /// holding tuwunel's own admin alias is refused here.
-fn import_alias(services: &Services, row: &Row) -> Result {
+async fn import_alias(services: &Services, row: &Row) -> Result {
 	let alias = OwnedRoomAliasId::try_from(row.get::<_, &str>(0)).map_err(|e| err!("{e}"))?;
 	let room_id = OwnedRoomId::try_from(row.get::<_, &str>(1)).map_err(|e| err!("{e}"))?;
 	let creator = match row.get::<_, Option<&str>>(2) {
@@ -124,6 +124,15 @@ fn import_alias(services: &Services, row: &Row) -> Result {
 
 	if alias == services.admin.admin_alias {
 		return Err(err!("it is tuwunel's admin room alias"));
+	}
+
+	if services
+		.alias
+		.resolve_local_alias(&alias)
+		.await
+		.is_ok_and(|existing| existing == room_id)
+	{
+		return Ok(());
 	}
 
 	services
