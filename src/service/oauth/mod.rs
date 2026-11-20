@@ -475,7 +475,8 @@ fn unique_id_sub_parts<'a>(
 /// Issuer string used as input to the identity hash. Pinned per-brand for
 /// providers whose published issuer has changed under us, so existing account
 /// associations survive the change.
-fn identity_issuer(provider: &Provider) -> Option<&str> {
+#[must_use]
+pub fn identity_issuer(provider: &Provider) -> Option<&str> {
 	match provider.brand.as_str() {
 		| "github" => Some("https://github.com/"),
 		| _ => provider.issuer_url.as_ref().map(Url::as_str),
