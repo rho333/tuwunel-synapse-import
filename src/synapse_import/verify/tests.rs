@@ -10,6 +10,7 @@ use super::{
 	compare::{differing_fields, same_keys},
 	events::auth_events,
 	keys::{Outcome, classify, parse_key_json},
+	media::content_type_matches,
 	receipts::receipts,
 	report::Verification,
 	userdata::rule_actions,
@@ -189,4 +190,16 @@ fn push_rule_actions_normalize_or_explain() {
 
 	assert_eq!(rule_actions(Some("nope"), None), Err("Synapse stored invalid JSON"));
 	assert_eq!(rule_actions(Some("[]"), Some("{bad")), Err("Synapse stored invalid JSON"));
+}
+
+#[test]
+fn media_content_type_accepts_sniffed_animations_and_empty_strings() {
+	assert!(content_type_matches(None, None));
+	assert!(content_type_matches(Some(""), None));
+	assert!(content_type_matches(Some("image/png"), Some("image/png")));
+	assert!(content_type_matches(Some("image/png"), Some("image/apng")));
+	assert!(content_type_matches(Some("application/octet-stream"), Some("image/webp")));
+	assert!(content_type_matches(None, Some("image/gif")));
+	assert!(!content_type_matches(Some("image/png"), Some("image/jpeg")));
+	assert!(!content_type_matches(Some("image/png"), None));
 }
