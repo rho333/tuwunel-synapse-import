@@ -395,21 +395,8 @@ pub async fn count_one_time_keys(
 	user_id: &UserId,
 	device_id: &DeviceId,
 ) -> BTreeMap<OneTimeKeyAlgorithm, UInt> {
-	let Some(otk) = self.db.onetimekeyid4225_otk.as_ref() else {
-		// Without the MSC4225 column this node cannot observe the authoritative
-		// pool, so preserve "unknown" instead of falsely reporting zero keys.
-		return BTreeMap::new();
-	};
-
-	let prefix = (user_id, device_id, Interfix);
-	let algorithm_counts: BTreeMap<OneTimeKeyAlgorithm, UInt> = otk
-		.keys_prefix(&prefix)
-		.ignore_err()
-		.ready_fold(BTreeMap::new(), |mut acc, (.., id): OtkRowKey<'_>| {
-			let count: &mut UInt = acc.entry(id.algorithm()).or_default();
-			*count = count.saturating_add(1_u32.into());
-			acc
-		})
+	let algorithm_counts = self
+		.count_one_time_keys_raw(user_id, device_id)
 		.await;
 
 	let total = algorithm_counts
@@ -420,12 +407,39 @@ pub async fn count_one_time_keys(
 		.fold(0_usize, usize::saturating_add);
 
 	let limit = self.services.config.one_time_key_limit;
-	if let Some(excess) = total.checked_sub(limit).filter(|&n| n > 0) {
+	if !self.services.db.is_read_only()
+		&& let Some(excess) = total.checked_sub(limit).filter(|&n| n > 0)
+	{
 		self.prune_one_time_keys(user_id, device_id, excess)
 			.await;
 	}
 
 	complete_one_time_key_counts(algorithm_counts)
+}
+
+/// Counts one-time keys stored for `(user, device)` without seeding zero entries
+/// or pruning excess keys.
+#[implement(super::Service)]
+pub async fn count_one_time_keys_raw(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+) -> BTreeMap<OneTimeKeyAlgorithm, UInt> {
+	let Some(otk) = self.db.onetimekeyid4225_otk.as_ref() else {
+		// Without the MSC4225 column this node cannot observe the authoritative
+		// pool, so preserve "unknown" instead of falsely reporting zero keys.
+		return BTreeMap::new();
+	};
+
+	let prefix = (user_id, device_id, Interfix);
+	otk.keys_prefix(&prefix)
+		.ignore_err()
+		.ready_fold(BTreeMap::new(), |mut acc, (.., id): OtkRowKey<'_>| {
+			let count: &mut UInt = acc.entry(id.algorithm()).or_default();
+			*count = count.saturating_add(1_u32.into());
+			acc
+		})
+		.await
 }
 
 /// Keep zero-count algorithms visible to clients after an OTK pool is drained.
@@ -816,7 +830,7 @@ async fn uploaded_key_role(&self, user_id: &UserId, key_id: &str) -> Result<Opti
 }
 
 #[implement(super::Service)]
-pub(super) async fn is_cross_signing_key_id(
+pub async fn is_cross_signing_key_id(
 	&self,
 	user_id: &UserId,
 	key_id: &str,
