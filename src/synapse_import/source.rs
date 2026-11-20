@@ -101,8 +101,8 @@ impl Source {
 	pub(super) async fn has_column(&self, table: &str, column: &str) -> Result<bool> {
 		let rows = self
 			.rows(
-				"SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
-				 AND table_name = $1 AND column_name = $2",
+				"SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 \
+				 AND attnum > 0 AND NOT attisdropped",
 				&[&table, &column],
 			)
 			.await?;
@@ -126,11 +126,7 @@ impl Source {
 
 	pub(super) async fn has_table(&self, table: &str) -> Result<bool> {
 		let rows = self
-			.rows(
-				"SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() \
-				 AND table_name = $1",
-				&[&table],
-			)
+			.rows("SELECT 1 WHERE to_regclass($1) IS NOT NULL", &[&table])
 			.await?;
 
 		Ok(!rows.is_empty())
