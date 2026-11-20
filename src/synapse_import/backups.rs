@@ -30,8 +30,8 @@ struct Metadata<'a> {
 
 #[derive(Serialize)]
 struct SessionKey<'a> {
-	first_message_index: i32,
-	forwarded_count: i32,
+	first_message_index: u32,
+	forwarded_count: u32,
 	is_verified: bool,
 	session_data: &'a RawValue,
 }
@@ -92,22 +92,25 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 	Ok(())
 }
 
-async fn create_version(services: &Services, user_id: &UserId, row: &Row) -> Result {
-	let version: i64 = row.get(1);
-	let auth_data = json_column(row.get(3))?;
-	let metadata = to_raw_value(&Metadata {
-		algorithm: row.get(2),
-		auth_data: &auth_data,
-	})?;
-
-	let version = version
-		.try_into()
-		.map_err(|e| err!("invalid version: {e}"))?;
+pub(super) async fn create_version(services: &Services, user_id: &UserId, row: &Row) -> Result {
+	let (version, metadata) = parse_backup_version(row.get(1), row.get(2), row.get(3))?;
 
 	services
 		.key_backups
-		.create_backup_with_version(user_id, version, &Raw::from_json(metadata))
+		.create_backup_with_version(user_id, version, &metadata)
 		.await
+}
+
+pub(super) fn parse_backup_version(
+	version: i64,
+	algorithm: &str,
+	auth_data: String,
+) -> Result<(u64, Raw<ruma::api::client::backup::BackupAlgorithm>)> {
+	let auth_data = json_column(auth_data)?;
+	let metadata = to_raw_value(&Metadata { algorithm, auth_data: &auth_data })?;
+	let version = u64::try_from(version).map_err(|e| err!("invalid version: {e}"))?;
+
+	Ok((version, Raw::from_json(metadata)))
 }
 
 async fn import_room_keys(
@@ -147,21 +150,29 @@ async fn import_room_keys(
 	Ok(())
 }
 
-fn session_key(row: &Row) -> Result<BackedUpKey> {
+pub(super) fn session_key(row: &Row) -> Result<BackedUpKey> {
 	let room_id: OwnedRoomId = row
 		.get::<_, &str>(0)
 		.try_into()
 		.map_err(|e| err!("invalid room ID: {e}"))?;
 
+	let first_message_index = u32::try_from(row.get::<_, i32>(2))
+		.map_err(|e| err!("invalid first_message_index: {e}"))?;
+	let forwarded_count = u32::try_from(row.get::<_, i32>(3))
+		.map_err(|e| err!("invalid forwarded_count: {e}"))?;
+
 	let session_data = json_column(row.get(5))?;
 	let key = to_raw_value(&SessionKey {
-		first_message_index: row.get(2),
-		forwarded_count: row.get(3),
+		first_message_index,
+		forwarded_count,
 		is_verified: row.get(4),
 		session_data: &session_data,
 	})?;
+	let raw = Raw::from_json(key);
+	raw.deserialize()
+		.map_err(|e| err!("invalid session key: {e}"))?;
 
-	Ok((room_id, row.get(1), Raw::from_json(key)))
+	Ok((room_id, row.get(1), raw))
 }
 
 /// Adds the batch's keys to the backup, and empties it.
