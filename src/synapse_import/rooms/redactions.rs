@@ -78,12 +78,21 @@ async fn redact_if_late(
 
 	let reason = services.timeline.get_pdu(redaction).await?;
 
+	// Judge against the room's power levels when `redaction` was sent (set_current_state
+	// installs the final room state after this pass completes).
+	if let Ok(at_redaction) = services.state.pdu_shortstatehash(redaction).await {
+		services
+			.state
+			.set_room_state(room_id, at_redaction, state_lock);
+	}
+
 	// As Synapse judges it: the redacter's power, or a redaction from the target's server.
-	if !services
+	let allowed = services
 		.state_accessor
 		.user_can_redact(target, reason.sender(), room_id, true)
-		.await?
-	{
+		.await
+		.unwrap_or(false);
+	if !allowed {
 		return Ok(());
 	}
 
