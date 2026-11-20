@@ -78,7 +78,7 @@ async fn import_receipt(services: &Services, row: &Row) -> Result {
 				})
 				.await;
 		},
-		| "m.read.private" => {
+		| "m.read.private" | "org.matrix.msc2285.read.private" => {
 			let count = event_count(services, &event_id).await?;
 			services
 				.read_receipt

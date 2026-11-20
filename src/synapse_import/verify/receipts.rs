@@ -32,10 +32,10 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 	// Ordered by room, so only one room's receipts are held at a time.
 	let mut held: Option<(OwnedRoomId, BTreeSet<Receipt>)> = None;
 	while let Some(row) = rows.try_next().await? {
-		let (room, kind, event_id, thread): (&str, &str, &str, Option<&str>) =
+		let (room, raw_kind, event_id, thread): (&str, &str, &str, Option<&str>) =
 			(row.get(0), row.get(1), row.get(3), row.get(4));
 
-		let subject = format!("{room} {kind} {}", row.get::<_, &str>(2));
+		let subject = format!("{room} {raw_kind} {}", row.get::<_, &str>(2));
 		let (Ok(room_id), Ok(user_id)) = (<&RoomId>::try_from(room), user_id(&row, 2)) else {
 			ctx.out
 				.excuse(DOMAIN, subject, "invalid room or user ID");
@@ -46,11 +46,15 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 			continue;
 		}
 
-		if kind != "m.read" && kind != "m.read.private" {
-			ctx.out
-				.excuse(DOMAIN, subject, "a receipt type tuwunel doesn't support");
-			continue;
-		}
+		let kind = match raw_kind {
+			| "m.read" => "m.read",
+			| "m.read.private" | "org.matrix.msc2285.read.private" => "m.read.private",
+			| _ => {
+				ctx.out
+					.excuse(DOMAIN, subject, "a receipt type tuwunel doesn't support");
+				continue;
+			},
+		};
 
 		if let Err(e) = receipt_ts(row.get(5)) {
 			ctx.out.excuse(DOMAIN, subject, e);
