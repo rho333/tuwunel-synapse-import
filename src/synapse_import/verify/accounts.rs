@@ -36,7 +36,8 @@ async fn users(ctx: &mut Ctx<'_>) -> Result {
 		let user_id = match user_id(&row, 0) {
 			| Ok(user_id) => user_id,
 			| Err(e) => {
-				ctx.out.excuse("users", row.get::<_, &str>(0), e);
+				ctx.out
+					.excuse("users", row.get::<_, Option<&str>>(0).unwrap_or("<null>"), e);
 				continue;
 			},
 		};

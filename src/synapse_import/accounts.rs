@@ -65,9 +65,9 @@ pub(super) async fn user_rows(source: &Source) -> Result<Vec<Row>> {
 	source
 		.rows(
 			&format!(
-				"SELECT name, password_hash, admin <> 0, deactivated <> 0, is_guest <> 0, \
-				 locked, {suspended}, shadow_banned IS TRUE, approved IS FALSE FROM users ORDER \
-				 BY name"
+				"SELECT name, password_hash, (admin <> 0) IS TRUE, (deactivated <> 0) IS TRUE, \
+				 (is_guest <> 0) IS TRUE, locked IS TRUE, ({suspended}) IS TRUE, shadow_banned \
+				 IS TRUE, approved IS FALSE FROM users ORDER BY name"
 			),
 			&[],
 		)
