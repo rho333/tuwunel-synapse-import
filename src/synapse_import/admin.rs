@@ -9,7 +9,7 @@ use tuwunel_service::{Services, registration_tokens::TokenExpires};
 use super::{
 	Report,
 	config::SynapseConfig,
-	source::{Source, user_id},
+	source::{Source, opt_user_id},
 };
 
 pub(super) async fn import(
@@ -41,9 +41,9 @@ async fn import_blocked_rooms(
 			continue;
 		};
 
-		match user_id(&row, 1) {
-			| Ok(blocker) => services.metadata.block_room(&room_id, &blocker),
-			| Err(_) => services.metadata.ban_room(&room_id),
+		match opt_user_id(&row, 1) {
+			| Ok(Some(blocker)) => services.metadata.block_room(&room_id, &blocker),
+			| Ok(None) | Err(_) => services.metadata.ban_room(&room_id),
 		}
 
 		Report::count(&mut report.blocked_rooms);
