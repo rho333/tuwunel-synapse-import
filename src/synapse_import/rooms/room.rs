@@ -111,7 +111,7 @@ async fn append_timeline(
 			.await?;
 
 		let before = groups
-			.before(services, source, &pdu, state_group)
+			.before(services, source, &pdu, state_group, soft_failed)
 			.await
 			.and_then(|before| {
 				before.ok_or_else(|| err!("Synapse doesn't record the state before it"))

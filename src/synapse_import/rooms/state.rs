@@ -130,8 +130,8 @@ impl StateGroups {
 		Ok(())
 	}
 
-	/// The state before `pdu`, from `group`, the state after it. None when
-	/// Synapse's groups don't determine it, which would need state resolution.
+	/// The state before `pdu`, from `group` (the state after it, or before it
+	/// when `soft_failed`).
 	///
 	/// Synapse stores a state event's group as the state before it plus the
 	/// event, so that parent group is the answer. Failing that, as across a
@@ -143,10 +143,15 @@ impl StateGroups {
 		_source: &Source,
 		pdu: &PduEvent,
 		group: Option<i64>,
+		soft_failed: bool,
 	) -> Result<Option<CompressedState>> {
 		let Some(after) = group else {
 			return Ok(None);
 		};
+
+		if soft_failed {
+			return self.state(after).map(compress).map(Some);
+		}
 
 		let Some(state_key) = pdu.state_key() else {
 			return self.state(after).map(compress).map(Some);
