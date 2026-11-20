@@ -853,3 +853,33 @@ fn short_of_space_is_strictly_below_the_minimum() {
 	assert!(!is_short_of_space(0, 0));
 	assert!(is_short_of_space(u64::MAX - 1, u64::MAX));
 }
+
+#[tokio::test]
+async fn metadata_without_content_type_round_trips_as_none() -> tuwunel_core::Result {
+	use ruma::Mxc;
+	use tuwunel_core::config::Figment;
+
+	use crate::test_utils::fixture;
+
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let media = &fixture.services.media;
+	let mxc = Mxc {
+		server_name: fixture.services.globals.server_name(),
+		media_id: "untypedMedia12345",
+	};
+
+	media
+		.create(&mxc, None, None, None, b"plain opaque payload")
+		.await?;
+
+	let meta = media
+		.get_metadata(&mxc)
+		.await
+		.expect("metadata stored");
+	assert_eq!(meta.content_type, None, "absent content_type must not read back as Some(\"\")");
+
+	Ok(())
+}
