@@ -524,48 +524,6 @@ pub fn update(mut config: Figment, args: &Args) -> Result<Figment> {
 		config = config.join((RESTORE_KEY, backup_id));
 	}
 
-	#[cfg(feature = "synapse_import")]
-	let verify_only = args.import_verify_only;
-	#[cfg(not(feature = "synapse_import"))]
-	let verify_only = false;
-
-	if args.read_only || verify_only {
-		config = config.join(("rocksdb_read_only", true));
-	}
-
-	// A fresh database's first start still runs a migration that writes, which read-only panics on.
-	if verify_only {
-		config = config.join(("database_migrations", false));
-	}
-
-	#[cfg(feature = "synapse_import")]
-	let importing = args.import_synapse.is_some();
-	#[cfg(not(feature = "synapse_import"))]
-	let importing = false;
-
-	if args.maintenance || args.read_only || importing {
-		config = config.join(("maintenance", true));
-		config = config.join(("listening", false));
-		config = config.join(("startup_netburst", false));
-	}
-
-	#[cfg(feature = "synapse_import")]
-	if args.import_dry_run {
-		let database_path = config
-			.extract_inner::<PathBuf>("database_path")
-			.map_err(|e| err!(Config("database_path", "{e}")))?;
-
-		// From the file name, so a trailing slash can't put it inside the real database.
-		let mut name = database_path
-			.file_name()
-			.ok_or_else(|| err!(Config("database_path", "names no directory")))?
-			.to_owned();
-
-		name.push(".dry-run");
-		// merge, not join: join keeps the configured value.
-		config = config.merge(("database_path", database_path.with_file_name(name)));
-	}
-
 	#[cfg(feature = "console")]
 	// Indicate the admin console should be spawned automatically if the
 	// configuration file hasn't already.
@@ -579,8 +537,9 @@ pub fn update(mut config: Figment, args: &Args) -> Result<Figment> {
 	// Update config with names of any functional-tests
 	config = config.adjoin(("test", &args.test));
 
-	// All other individual overrides can go last in case we have options which
-	// set multiple conf items at once and the user still needs granular overrides.
+	// Apply granular -O/--option overrides before forced mode invariants so
+	// `-O database_path=...` is honored by `--import-dry-run` while `-O` cannot
+	// defeat `--import-verify-only` read-only safety.
 	for option in &args.option {
 		let (path, val) = option
 			.split_once('=')
@@ -604,6 +563,48 @@ pub fn update(mut config: Figment, args: &Args) -> Result<Figment> {
 
 		// Figment::merge() overrides existing
 		config = config.merge((path, val.find(path)));
+	}
+
+	#[cfg(feature = "synapse_import")]
+	let verify_only = args.import_verify_only;
+	#[cfg(not(feature = "synapse_import"))]
+	let verify_only = false;
+
+	if args.read_only || verify_only {
+		config = config.merge(("rocksdb_read_only", true));
+	}
+
+	// A fresh database's first start still runs a migration that writes, which read-only panics on.
+	if verify_only {
+		config = config.merge(("database_migrations", false));
+	}
+
+	#[cfg(feature = "synapse_import")]
+	let importing = args.import_synapse.is_some();
+	#[cfg(not(feature = "synapse_import"))]
+	let importing = false;
+
+	if args.maintenance || args.read_only || importing {
+		config = config.merge(("maintenance", true));
+		config = config.merge(("listening", false));
+		config = config.merge(("startup_netburst", false));
+	}
+
+	#[cfg(feature = "synapse_import")]
+	if args.import_dry_run {
+		let database_path = config
+			.extract_inner::<PathBuf>("database_path")
+			.map_err(|e| err!(Config("database_path", "{e}")))?;
+
+		// From the file name, so a trailing slash can't put it inside the real database.
+		let mut name = database_path
+			.file_name()
+			.ok_or_else(|| err!(Config("database_path", "names no directory")))?
+			.to_owned();
+
+		name.push(".dry-run");
+		// merge, not join: join keeps the configured value.
+		config = config.merge(("database_path", database_path.with_file_name(name)));
 	}
 
 	Ok(config)
@@ -789,5 +790,30 @@ mod tests {
 			Args::try_parse_from(["tuwunel".into(), long(option), "1".into()])
 				.expect("one histogram bucket accepted");
 		}
+	}
+
+	#[cfg(feature = "synapse_import")]
+	#[test]
+	fn import_verify_only_forces_read_only_and_disables_migrations() {
+		let explicit = Figment::new()
+			.merge(("rocksdb_read_only", false))
+			.merge(("database_migrations", true))
+			.merge(("listening", true));
+		let argv = [
+			"tuwunel",
+			"-O",
+			"rocksdb_read_only=false",
+			"--import-synapse",
+			"homeserver.yaml",
+			"--synapse-db",
+			"postgresql://localhost/synapse",
+			"--import-verify-only",
+		];
+		let raw = updated(&argv, explicit).expect("accepted");
+
+		assert_eq!(raw.find_value("rocksdb_read_only").unwrap().to_bool(), Some(true));
+		assert_eq!(raw.find_value("database_migrations").unwrap().to_bool(), Some(false));
+		assert_eq!(raw.find_value("listening").unwrap().to_bool(), Some(false));
+		assert_eq!(raw.find_value("maintenance").unwrap().to_bool(), Some(true));
 	}
 }
