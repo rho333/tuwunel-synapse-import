@@ -78,7 +78,7 @@ impl Server {
 			oidcreqid_authrequest: args.db["oidcreqid_authrequest"].clone(),
 		};
 
-		let key = init_signing_key(&db)?;
+		let key = init_signing_key(&db, args.db.is_read_only())?;
 		debug_info!(
 			key = ?key.key_id,
 			"Initializing OIDC server for next-gen auth (MSC2965)"
