@@ -20,7 +20,10 @@ use tuwunel_matrix::{
 	room::state::resolution::{AuthSet, StateMap},
 };
 
-use crate::rooms::short::{ShortStateHash, ShortStateKey};
+use crate::rooms::{
+	short::{ShortStateHash, ShortStateKey},
+	state_compressor::CompressedState,
+};
 
 enum ForkError {
 	State(Error),
@@ -224,6 +227,40 @@ where
 		.map(Some)
 		.map(Ok)
 		.await
+}
+
+/// Resolves and compresses the state before `pdu` from its `prev_events`
+/// snapshots when `pdu` merges multiple DAG branches.
+#[implement(super::Service)]
+pub async fn resolve_state_at_pdu<Pdu>(
+	&self,
+	pdu: &Pdu,
+	room_id: &RoomId,
+	room_version: &RoomVersionId,
+) -> Result<Option<CompressedState>>
+where
+	Pdu: Event,
+{
+	let Some(resolved) = self
+		.state_at_incoming_resolved(pdu, room_id, room_version)
+		.await?
+	else {
+		return Ok(None);
+	};
+
+	let compressed: CompressedState = resolved
+		.into_iter()
+		.stream()
+		.wide_then(async |(shortstatekey, event_id)| {
+			self.services
+				.state_compressor
+				.compress_state_event(shortstatekey, &event_id)
+				.await
+		})
+		.collect()
+		.await;
+
+	Ok(Some(compressed))
 }
 
 /// The fork a prev event contributes to resolution.
