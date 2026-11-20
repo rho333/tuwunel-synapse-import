@@ -8,7 +8,7 @@ use futures::StreamExt;
 use ruma::EventId;
 use tuwunel_core::Result;
 
-use super::{Ctx, rooms::Room};
+use super::{super::rooms::soft_failed, Ctx, rooms::Room};
 
 type State = BTreeMap<(String, String), String>;
 
@@ -49,7 +49,7 @@ pub(super) async fn unplaceable(ctx: &Ctx<'_>, event_id: &str) -> Result<Option<
 }
 
 pub(super) async fn verify(ctx: &mut Ctx<'_>, room: &Room<'_>) -> Result {
-	let rows = ctx
+	let mut rows = ctx
 		.source
 		.rows(
 			"SELECT c.type, c.state_key, c.event_id, m.membership FROM current_state_events c \
@@ -58,29 +58,70 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>, room: &Room<'_>) -> Result {
 		)
 		.await?;
 
+	let left_room = rows.is_empty();
+	if left_room && let Some(group) = last_timeline_group(ctx, room).await? {
+		rows = ctx
+			.source
+			.rows(
+				"WITH RECURSIVE chain(id, depth, path) AS (SELECT $1::bigint, 0, \
+				 ARRAY[$1::bigint] UNION ALL SELECT e.prev_state_group, chain.depth + 1, \
+				 chain.path || e.prev_state_group FROM chain JOIN state_group_edges e ON \
+				 e.state_group = chain.id WHERE NOT (e.prev_state_group = ANY(chain.path))) \
+				 SELECT DISTINCT ON (s.type, s.state_key) s.type, s.state_key, s.event_id, \
+				 m.membership FROM chain JOIN state_groups_state s ON s.state_group = chain.id \
+				 LEFT JOIN room_memberships m USING (event_id) ORDER BY s.type, s.state_key, \
+				 chain.depth ASC",
+				&[&group],
+			)
+			.await?;
+	}
+
 	let mut want = State::new();
-	let mut members: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+	let mut members: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 	for row in &rows {
 		let (kind, state_key, event_id): (&str, &str, &str) =
 			(row.get(0), row.get(1), row.get(2));
-		if <&EventId>::try_from(event_id).is_err() {
+		let Ok(id) = <&EventId>::try_from(event_id) else {
 			ctx.out.excuse(
 				"state",
 				format!("{} {kind} {state_key:?}", room.id),
 				"invalid event ID",
 			);
 			continue;
-		}
+		};
 
 		if kind == "m.room.member" {
-			let membership: Option<&str> = row.get(3);
-			members
-				.entry(membership.unwrap_or_default())
-				.or_default()
-				.insert(state_key.to_owned());
+			let membership = match row.get::<_, Option<&str>>(3) {
+				| Some(m) => m.to_owned(),
+				| None => member_content_membership(ctx, event_id).await?,
+			};
+			if matches!(membership.as_str(), "join" | "invite" | "knock") {
+				if ruma::UserId::parse(state_key).is_err() {
+					ctx.out.excuse(
+						"memberships",
+						format!("{} {state_key:?}", room.id),
+						"invalid member state_key",
+					);
+				} else if ctx.services.timeline.get_pdu_json(id).await.is_ok() {
+					members
+						.entry(membership)
+						.or_default()
+						.insert(state_key.to_owned());
+				} else {
+					ctx.out.excuse(
+						"memberships",
+						format!("{} {state_key}", room.id),
+						"member event could not be imported",
+					);
+				}
+			}
 		}
 
 		want.insert((kind.to_owned(), state_key.to_owned()), event_id.to_owned());
+	}
+
+	if left_room {
+		overlay_pending_local_invites(ctx, room, &mut members).await?;
 	}
 
 	let have = current_state(ctx, room).await;
@@ -106,6 +147,92 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>, room: &Room<'_>) -> Result {
 	}
 
 	memberships(ctx, room, &members).await;
+	Ok(())
+}
+
+/// Synapse empties `current_state_events` once no local user is joined to a
+/// room; Tuwunel keeps the state after the room's last appended timeline event.
+async fn last_timeline_group(ctx: &Ctx<'_>, room: &Room<'_>) -> Result<Option<i64>> {
+	let rows = ctx
+		.source
+		.rows(
+			"SELECT e.event_id, j.internal_metadata, g.state_group FROM events e JOIN event_json \
+			 j USING (event_id) JOIN event_to_state_groups g USING (event_id) LEFT JOIN \
+			 rejections r USING (event_id) WHERE e.room_id = $1 AND NOT e.outlier AND \
+			 e.rejection_reason IS NULL AND r.event_id IS NULL ORDER BY e.topological_ordering \
+			 DESC, e.stream_ordering DESC LIMIT 32",
+			&[&room.id.as_str()],
+		)
+		.await?;
+
+	for row in rows {
+		if soft_failed(row.get(1)) {
+			continue;
+		}
+
+		let Ok(id) = <&EventId>::try_from(row.get::<_, &str>(0)) else {
+			continue;
+		};
+
+		if ctx.services.timeline.get_pdu_id(id).await.is_ok() {
+			return Ok(Some(row.get(2)));
+		}
+	}
+
+	Ok(None)
+}
+
+async fn member_content_membership(ctx: &Ctx<'_>, event_id: &str) -> Result<String> {
+	let rows = ctx
+		.source
+		.rows("SELECT json FROM event_json WHERE event_id = $1", &[&event_id])
+		.await?;
+
+	Ok(rows
+		.first()
+		.and_then(|row| serde_json::from_str::<serde_json::Value>(row.get(0)).ok())
+		.and_then(|val| {
+			val.get("content")?
+				.get("membership")?
+				.as_str()
+				.map(ToOwned::to_owned)
+		})
+		.unwrap_or_default())
+}
+
+async fn overlay_pending_local_invites(
+	ctx: &Ctx<'_>,
+	room: &Room<'_>,
+	members: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result {
+	if !ctx.source.has_table("local_current_membership").await? {
+		return Ok(());
+	}
+
+	let rows = ctx
+		.source
+		.rows(
+			"SELECT user_id, membership FROM local_current_membership WHERE room_id = $1 AND \
+			 membership IN ('invite', 'knock')",
+			&[&room.id.as_str()],
+		)
+		.await?;
+
+	for row in rows {
+		let (user_str, membership): (&str, &str) = (row.get(0), row.get(1));
+		if !ctx.active.iter().any(|u| u.as_str() == user_str) {
+			continue;
+		}
+
+		for set in members.values_mut() {
+			set.remove(user_str);
+		}
+		members
+			.entry(membership.to_owned())
+			.or_default()
+			.insert(user_str.to_owned());
+	}
+
 	Ok(())
 }
 
@@ -176,7 +303,7 @@ fn compare(ctx: &mut Ctx<'_>, room: &Room<'_>, want: &State, have: &State) {
 async fn memberships(
 	ctx: &mut Ctx<'_>,
 	room: &Room<'_>,
-	members: &BTreeMap<&str, BTreeSet<String>>,
+	members: &BTreeMap<String, BTreeSet<String>>,
 ) {
 	let cache = &ctx.services.state_cache;
 	let lists = [
