@@ -22,8 +22,13 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 	let mut rows = pin!(
 		source
 			.stream(
-				"SELECT room_id, receipt_type, user_id, event_id, data, thread_id FROM \
-				 receipts_linearized ORDER BY stream_id",
+				"SELECT r.room_id, r.receipt_type, r.user_id, r.event_id, r.data, r.thread_id \
+				 FROM receipts_linearized r WHERE NOT (r.receipt_type IN ('m.read.private', \
+				 'org.matrix.msc2285.read.private') AND r.thread_id IS NOT NULL AND EXISTS \
+				 (SELECT 1 FROM receipts_linearized u WHERE u.room_id = r.room_id AND u.user_id \
+				 = r.user_id AND u.receipt_type IN ('m.read.private', \
+				 'org.matrix.msc2285.read.private') AND u.thread_id IS NULL AND u.stream_id > \
+				 r.stream_id)) ORDER BY r.stream_id",
 				&[],
 			)
 			.await?

@@ -27,8 +27,12 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 	let mut rows = pin!(
 		ctx.source
 			.stream(
-				"SELECT room_id, receipt_type, user_id, event_id, thread_id, data FROM \
-				 receipts_linearized ORDER BY room_id",
+				"SELECT r.room_id, r.receipt_type, r.user_id, r.event_id, r.thread_id, r.data, \
+				 EXISTS (SELECT 1 FROM receipts_linearized u WHERE u.room_id = r.room_id AND \
+				 u.user_id = r.user_id AND u.receipt_type IN ('m.read.private', \
+				 'org.matrix.msc2285.read.private') AND u.stream_id > r.stream_id AND \
+				 (u.thread_id IS NULL OR u.thread_id = r.thread_id)) FROM receipts_linearized r \
+				 ORDER BY r.room_id",
 				&[],
 			)
 			.await?
@@ -37,8 +41,13 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 	// Ordered by room, so only one room's receipts are held at a time.
 	let mut held: Option<(OwnedRoomId, BTreeSet<Receipt>)> = None;
 	while let Some(row) = rows.try_next().await? {
-		let (room, raw_kind, event_id, thread): (&str, &str, &str, Option<&str>) =
-			(row.get(0), row.get(1), row.get(3), row.get(4));
+		let (room, raw_kind, event_id, thread, superseded): (
+			&str,
+			&str,
+			&str,
+			Option<&str>,
+			bool,
+		) = (row.get(0), row.get(1), row.get(3), row.get(4), row.get(6));
 
 		let subject = format!("{room} {raw_kind} {}", row.get::<_, &str>(2));
 		let (Ok(room_id), Ok(user_id)) = (<&RoomId>::try_from(room), user_id(&row, 2)) else {
@@ -79,11 +88,17 @@ pub(super) async fn verify(ctx: &mut Ctx<'_>) -> Result {
 			continue;
 		}
 
-		if kind == "m.read.private"
-			&& let Err(e) = event_count_in_room(ctx.services, room_id, id).await
-		{
-			ctx.out.excuse(DOMAIN, subject, e);
-			continue;
+		if kind == "m.read.private" {
+			if superseded {
+				ctx.out
+					.excuse(DOMAIN, subject, "superseded by a newer private receipt");
+				continue;
+			}
+
+			if let Err(e) = event_count_in_room(ctx.services, room_id, id).await {
+				ctx.out.excuse(DOMAIN, subject, e);
+				continue;
+			}
 		}
 
 		if held
