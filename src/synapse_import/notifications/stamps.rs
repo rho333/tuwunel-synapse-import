@@ -6,41 +6,40 @@
 
 use std::collections::BTreeMap;
 
-use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId};
+use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
 use tuwunel_core::Result;
-use tuwunel_matrix::PduCount;
 use tuwunel_service::Services;
 
 use super::{
-	super::source::{Source, user_id},
+	super::{
+		receipts::event_count_in_room,
+		source::{Source, user_id},
+	},
 	counts::thread_root,
 };
 
-/// Each user's latest receipt per room and Synapse thread ID ('' unthreaded).
-const LATEST: &str = "
-SELECT DISTINCT ON (user_id, room_id, thread) user_id, room_id, thread, event_id,
-	event_stream_ordering
-FROM (
-	SELECT user_id, room_id, COALESCE(thread_id, '') AS thread, event_id, event_stream_ordering
-	FROM receipts_linearized
-	WHERE receipt_type IN ('m.read', 'm.read.private') AND user_id IN (SELECT name FROM users)
-) r
-ORDER BY user_id, room_id, thread, event_stream_ordering DESC NULLS LAST";
-
-type Receipt = (i64, OwnedEventId);
+/// Each local user's read receipts, resolved to imported timeline counts so an
+/// unimported target or negative backfilled stream ordering cannot shadow an
+/// earlier valid receipt.
+const RECEIPTS: &str = "
+SELECT user_id, room_id, COALESCE(thread_id, '') AS thread, event_id
+FROM receipts_linearized
+WHERE receipt_type IN ('m.read', 'm.read.private', 'org.matrix.msc2285.read.private')
+	AND user_id IN (SELECT name FROM users)
+ORDER BY user_id, room_id";
 
 #[derive(Default)]
 struct Latest {
-	unthreaded: Option<Receipt>,
-	main: Option<Receipt>,
-	threads: Vec<(OwnedEventId, Receipt)>,
+	unthreaded: Option<u64>,
+	main: Option<u64>,
+	threads: BTreeMap<OwnedEventId, u64>,
 }
 
 pub(super) async fn import(services: &Services, source: &Source) -> Result {
 	let mut latest: BTreeMap<(OwnedUserId, OwnedRoomId), Latest> = BTreeMap::new();
 
-	// A row that doesn't parse names an invalid receipt, which receipts reported.
-	for row in source.rows(LATEST, &[]).await? {
+	// A row that doesn't parse or wasn't imported was reported by receipts.
+	for row in source.rows(RECEIPTS, &[]).await? {
 		let (Ok(user_id), Ok(room_id), Ok(event_id)) = (
 			user_id(&row, 0),
 			OwnedRoomId::try_from(row.get::<_, &str>(1)),
@@ -49,46 +48,50 @@ pub(super) async fn import(services: &Services, source: &Source) -> Result {
 			continue;
 		};
 
-		let receipt = (row.get::<_, Option<i64>>(4).unwrap_or(0), event_id);
+		if !services.users.is_active(&user_id).await {
+			continue;
+		}
+
+		let Ok(count) = event_count_in_room(services, &room_id, &event_id).await else {
+			continue;
+		};
+
 		let entry = latest.entry((user_id, room_id)).or_default();
 		match row.get::<_, &str>(2) {
-			| "" => entry.unthreaded = Some(receipt),
-			| "main" => entry.main = Some(receipt),
+			| "" => entry.unthreaded = Some(entry.unthreaded.map_or(count, |prev| prev.max(count))),
+			| "main" => entry.main = Some(entry.main.map_or(count, |prev| prev.max(count))),
 			| thread =>
 				if let Ok(Some(root)) = thread_root(thread) {
-					entry.threads.push((root, receipt));
+					entry
+						.threads
+						.entry(root)
+						.and_modify(|prev| *prev = (*prev).max(count))
+						.or_insert(count);
 				},
 		}
 	}
 
 	for ((user_id, room_id), latest) in latest {
-		let unthreaded_at = latest.unthreaded.as_ref().map(|(at, _)| *at);
+		let unthreaded_at = latest.unthreaded;
 		let room = latest
 			.unthreaded
 			.into_iter()
 			.chain(latest.main)
 			.max();
-		if let Some((_, event_id)) = room {
-			stamp(services, (&user_id, &room_id, None), &event_id).await;
+		if let Some(count) = room {
+			services
+				.pusher
+				.import_last_read(&user_id, &room_id, None, count);
 		}
 
-		for (root, (at, event_id)) in latest.threads {
-			if unthreaded_at.is_none_or(|unthreaded| at > unthreaded) {
-				stamp(services, (&user_id, &room_id, Some(&root)), &event_id).await;
+		for (root, count) in latest.threads {
+			if unthreaded_at.is_none_or(|unthreaded| count > unthreaded) {
+				services
+					.pusher
+					.import_last_read(&user_id, &room_id, Some(&root), count);
 			}
 		}
 	}
 
 	Ok(())
-}
-
-type Key<'a> = (&'a OwnedUserId, &'a OwnedRoomId, Option<&'a EventId>);
-
-async fn stamp(services: &Services, (user_id, room_id, root): Key<'_>, event_id: &EventId) {
-	// A receipt for an event that wasn't imported was reported by receipts.
-	if let Ok(PduCount::Normal(count)) = services.timeline.get_pdu_count(event_id).await {
-		services
-			.pusher
-			.import_last_read(user_id, room_id, root, count);
-	}
 }
