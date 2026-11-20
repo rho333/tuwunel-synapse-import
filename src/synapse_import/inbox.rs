@@ -63,13 +63,6 @@ pub(super) async fn import(services: &Services, source: &Source, report: &mut Re
 		Report::count(&mut report.to_device);
 	}
 
-	let unsent = source.count("device_federation_outbox").await?;
-	if unsent > 0 {
-		report.skip(format!(
-			"{unsent} to-device messages for users on other servers were never sent"
-		));
-	}
-
 	Ok(())
 }
 
