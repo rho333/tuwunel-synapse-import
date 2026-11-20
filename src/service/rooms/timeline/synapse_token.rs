@@ -146,12 +146,16 @@ pub async fn synapse_token_count(
 	};
 
 	// Without a topological part Synapse bounds the stream ordering alone.
+	// Non-negative `s`/`m` tokens come from the live stream, so backfilled rows
+	// (`stream_ordering < 0`, placed mid-timeline by depth) must not match them.
+	let zero_stream = bias(0);
 	let last = pin!(
 		map.rev_stream_from::<Key, u64, _>(&upper)
 			.ignore_err()
 			.ready_take_while(in_room)
 			.ready_filter(move |((_, _, row_stream), _)| {
-				position.topological.is_some() || *row_stream <= stream
+				position.topological.is_some()
+					|| (*row_stream <= stream && (stream < zero_stream || *row_stream >= zero_stream))
 			})
 	)
 	.next()
@@ -223,5 +227,37 @@ mod tests {
 		for token in ["", "123", "-7", "x1", "t11", "tA-1", "t-5-3", "s", "m1~x"] {
 			assert_eq!(SynapsePosition::parse(token), None, "{token}");
 		}
+	}
+
+	#[tokio::test]
+	async fn stream_tokens_ignore_negative_backfill() -> tuwunel_core::Result {
+		use ruma::{api::Direction, room_id};
+		use tuwunel_core::config::Figment;
+		use tuwunel_matrix::PduCount;
+
+		use super::TokenBound;
+		use crate::test_utils::fixture;
+
+		let Some(fixture) = fixture(Figment::new()).await? else {
+			return Ok(());
+		};
+
+		let services = &fixture.services;
+		let room_id = room_id!("!synapsetok:localhost");
+		let short = services.short.get_or_create_shortroomid(room_id).await;
+
+		// Event 1 at stream 100, backfilled Event 2 mid-timeline at stream -50, Event 3 at stream 200.
+		services.timeline.record_synapse_position(short, 1, 100, PduCount::Normal(10));
+		services.timeline.record_synapse_position(short, 2, -50, PduCount::Normal(20));
+		services.timeline.record_synapse_position(short, 3, 200, PduCount::Normal(30));
+
+		// Forward From s150 must resolve after Event 1 (count 10), NOT jump to backfilled Event 2 (count 20)!
+		let from_s150 = services
+			.timeline
+			.synapse_token_count(room_id, "s150_0", Direction::Forward, TokenBound::From)
+			.await;
+		assert_eq!(from_s150, Some(PduCount::Normal(10)));
+
+		Ok(())
 	}
 }
