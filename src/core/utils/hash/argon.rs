@@ -83,7 +83,12 @@ pub fn mark_keyed_argon2_hash(hash: &str) -> Result<PhcString> {
 		return Err(err!("Not an Argon2 password hash."));
 	};
 
-	if parsed.params.get(KEYID).is_none() {
+	if let Some(existing) = parsed.params.get(KEYID) {
+		let mut buf = [0_u8; IMPORTED_KEYID.len()];
+		if existing.b64_decode(&mut buf) != Ok(IMPORTED_KEYID) {
+			return Err(err!("Argon2 password hash already carries another keyid."));
+		}
+	} else {
 		parsed
 			.params
 			.add_b64_bytes(KEYID, IMPORTED_KEYID)
@@ -96,7 +101,12 @@ pub fn mark_keyed_argon2_hash(hash: &str) -> Result<PhcString> {
 /// Whether a stored password hash was marked by [`mark_keyed_argon2_hash`].
 #[must_use]
 pub fn is_keyed_argon2_hash(hash: &str) -> bool {
-	parse_argon2_hash(hash).is_some_and(|hash| hash.params.get(KEYID).is_some())
+	parse_argon2_hash(hash).is_some_and(|hash| {
+		let mut buf = [0_u8; IMPORTED_KEYID.len()];
+		hash.params
+			.get(KEYID)
+			.is_some_and(|val| val.b64_decode(&mut buf) == Ok(IMPORTED_KEYID))
+	})
 }
 
 /// Whether a stored password hash is a complete Argon2 PHC string.
@@ -209,6 +219,9 @@ mod tests {
 
 		let unkeyed = password("temp123", COST).expect("digest");
 		assert!(!is_keyed_argon2_hash(&unkeyed));
+		let other_keyid = KEYED.replacen("p=1$", "p=1,keyid=b3RoZXI$", 1);
+		assert!(!is_keyed_argon2_hash(&other_keyid));
+		mark_keyed_argon2_hash(&other_keyid).unwrap_err();
 		mark_keyed_argon2_hash("temp123").unwrap_err();
 	}
 
