@@ -45,12 +45,22 @@ async fn register(services: &Services, file: &Path) -> Result {
 }
 
 /// Normalizes Synapse/Mautrix registration quirks before Ruma deserializes:
-/// empty YAML keys (`aliases:` -> `null`, `protocols:`) become `[]` / omitted.
+/// `de.sorunome.msc2409.push_ephemeral` becomes `receive_ephemeral`, and empty
+/// YAML keys (`aliases:` -> `null`) become `[]`.
 pub(super) fn parse_registration(yaml: &str) -> Result<Registration> {
 	let mut value: serde_yaml::Value =
 		serde_yaml::from_str(yaml).map_err(|e| err!("cannot parse it: {e}"))?;
 
 	if let Some(map) = value.as_mapping_mut() {
+		let legacy_ephemeral = serde_yaml::Value::String("de.sorunome.msc2409.push_ephemeral".into());
+		let receive_ephemeral = serde_yaml::Value::String("receive_ephemeral".into());
+		if !map.contains_key(&receive_ephemeral)
+			&& let Some(val) = map.get(&legacy_ephemeral).cloned()
+			&& val.is_bool()
+		{
+			map.insert(receive_ephemeral, val);
+		}
+
 		let protocols_key = serde_yaml::Value::String("protocols".into());
 		if map
 			.get(&protocols_key)
@@ -84,7 +94,7 @@ mod tests {
 	use super::parse_registration;
 
 	#[test]
-	fn mautrix_registration_normalizes_null_namespaces_and_protocols() {
+	fn mautrix_registration_normalizes_msc2409_ephemeral_and_null_namespaces() {
 		let yaml = r"
 id: whatsapp
 url: http://localhost:29318
@@ -92,6 +102,7 @@ as_token: as_secret_token_1234567890
 hs_token: hs_secret_token_1234567890
 sender_localpart: whatsappbot
 rate_limited: false
+de.sorunome.msc2409.push_ephemeral: true
 protocols:
 namespaces:
   users:
@@ -103,9 +114,30 @@ namespaces:
 
 		let reg = parse_registration(yaml).expect("valid Mautrix registration");
 		assert_eq!(reg.id, "whatsapp");
+		assert!(reg.receive_ephemeral, "MSC2409 push_ephemeral mapped to receive_ephemeral");
 		assert_eq!(reg.namespaces.users.len(), 1);
 		assert!(reg.namespaces.aliases.is_empty());
 		assert!(reg.namespaces.rooms.is_empty());
 		assert!(reg.protocols.is_none());
+	}
+
+	#[test]
+	fn explicit_receive_ephemeral_takes_precedence_over_msc2409() {
+		let yaml = "
+id: signal
+url: http://localhost:29328
+as_token: as_secret_token_1234567890
+hs_token: hs_secret_token_1234567890
+sender_localpart: signalbot
+receive_ephemeral: false
+de.sorunome.msc2409.push_ephemeral: true
+namespaces:
+  users: []
+  aliases: []
+  rooms: []
+";
+
+		let reg = parse_registration(yaml).expect("valid registration");
+		assert!(!reg.receive_ephemeral);
 	}
 }
