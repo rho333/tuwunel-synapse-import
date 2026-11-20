@@ -72,7 +72,7 @@ async fn import_cross_signing_keys(
 			| "user_signing" => Ok(2),
 			| other => Err!("unknown type {other:?}"),
 		};
-		let key = slot.and_then(|slot| Ok((slot, raw_json(row.get(2))?)));
+		let key = slot.and_then(|slot| Ok((slot, parse_cross_signing_key(row.get(2))?)));
 		if let Some((slot, key)) =
 			report.keep(format_args!("{user_id} cross-signing key {kind}"), key)
 		{
@@ -165,8 +165,7 @@ async fn import_one_time_keys(
 		};
 
 		// One key per call: a batch is stored in key ID order, not upload order.
-		let key = one_time_key_id(row.get(2), row.get(3))
-			.and_then(|id| Ok((id, raw_json(row.get(4))?)));
+		let key = parse_one_time_key(row.get(2), row.get(3), row.get(4));
 		let Some(key) = report.keep(format_args!("{user_id} {device_id} one-time key"), key)
 		else {
 			continue;
@@ -207,8 +206,7 @@ async fn import_fallback_keys(
 			continue;
 		};
 
-		let key = one_time_key_id(row.get(2), row.get(3))
-			.and_then(|id| Ok((id, raw_json(row.get(4))?)));
+		let key = parse_one_time_key(row.get(2), row.get(3), row.get(4));
 		let Some((key_id, key)) =
 			report.keep(format_args!("{user_id} {device_id} fallback key"), key)
 		else {
@@ -289,6 +287,31 @@ async fn import_signatures(services: &Services, source: &Source, report: &mut Re
 	}
 
 	Ok(())
+}
+
+pub(super) fn parse_cross_signing_key(raw: String) -> Result<Raw<CrossSigningKey>> {
+	let raw: Raw<CrossSigningKey> = raw_json(raw)?;
+	let parsed = raw
+		.deserialize()
+		.map_err(|e| err!("invalid cross-signing key: {e}"))?;
+	if parsed.keys.len() != 1 {
+		return Err!("cross-signing key must contain exactly one public key");
+	}
+
+	Ok(raw)
+}
+
+pub(super) fn parse_one_time_key(
+	algorithm: &str,
+	key_id: &str,
+	raw: String,
+) -> Result<(OwnedOneTimeKeyId, Raw<OneTimeKey>)> {
+	let id = one_time_key_id(algorithm, key_id)?;
+	let raw: Raw<OneTimeKey> = raw_json(raw)?;
+	raw.deserialize()
+		.map_err(|e| err!("invalid one-time key: {e}"))?;
+
+	Ok((id, raw))
 }
 
 fn one_time_key_id(algorithm: &str, key_id: &str) -> Result<OwnedOneTimeKeyId> {

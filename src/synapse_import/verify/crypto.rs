@@ -11,7 +11,10 @@ use serde_json::Value;
 use tuwunel_core::Result;
 
 use super::{
-	super::source::{json, user_id},
+	super::{
+		crypto::{parse_cross_signing_key, parse_one_time_key},
+		source::{json, user_id},
+	},
 	Ctx,
 	compare::same_keys,
 };
@@ -96,9 +99,10 @@ async fn cross_signing(ctx: &mut Ctx<'_>) -> Result {
 		}
 
 		let subject = format!("{user_id} {kind}");
-		let Ok(want) = json(row.get(2)) else {
+		let Ok(want) = parse_cross_signing_key(row.get(2)).and_then(|raw| json(raw.json().get()))
+		else {
 			ctx.out
-				.excuse("cross_signing", subject, "Synapse stored invalid JSON");
+				.excuse("cross_signing", subject, "invalid cross-signing key");
 			continue;
 		};
 
@@ -150,8 +154,8 @@ async fn one_time_keys(ctx: &mut Ctx<'_>) -> Result {
 	let mut rows = pin!(
 		ctx.source
 			.stream(
-				"SELECT user_id, device_id, algorithm, key_json FROM e2e_one_time_keys_json \
-				 ORDER BY user_id, device_id",
+				"SELECT user_id, device_id, algorithm, key_id, key_json FROM \
+				 e2e_one_time_keys_json ORDER BY user_id, device_id",
 				&[],
 			)
 			.await?
@@ -165,12 +169,9 @@ async fn one_time_keys(ctx: &mut Ctx<'_>) -> Result {
 			continue;
 		};
 
-		if json(row.get(3)).is_err() {
-			ctx.out.excuse(
-				"one_time_keys",
-				format!("{} {}", device.0, device.1),
-				"Synapse stored invalid JSON",
-			);
+		if let Err(e) = parse_one_time_key(row.get(2), row.get(3), row.get(4)) {
+			ctx.out
+				.excuse("one_time_keys", format!("{} {}", device.0, device.1), e);
 			continue;
 		}
 
@@ -204,7 +205,7 @@ async fn one_time_keys(ctx: &mut Ctx<'_>) -> Result {
 	for (user_id, device_id) in keyless {
 		let have = services
 			.users
-			.count_one_time_keys(&user_id, &device_id)
+			.count_one_time_keys_raw(&user_id, &device_id)
 			.await;
 		let have: u64 = have.values().map(|n| u64::from(*n)).sum();
 		if have > 0 {
@@ -226,7 +227,7 @@ async fn compare_one_time_keys(ctx: &mut Ctx<'_>, want: Option<(Device, BTreeMap
 	let have = ctx
 		.services
 		.users
-		.count_one_time_keys(&user_id, &device_id)
+		.count_one_time_keys_raw(&user_id, &device_id)
 		.await;
 	for (algorithm, want) in counts {
 		let have = have
@@ -244,7 +245,8 @@ async fn fallback_keys(ctx: &mut Ctx<'_>) -> Result {
 	let rows = ctx
 		.source
 		.rows(
-			"SELECT user_id, device_id, algorithm, key_json, used FROM e2e_fallback_keys_json",
+			"SELECT user_id, device_id, algorithm, key_id, key_json, used FROM \
+			 e2e_fallback_keys_json",
 			&[],
 		)
 		.await?;
@@ -255,17 +257,14 @@ async fn fallback_keys(ctx: &mut Ctx<'_>) -> Result {
 			continue;
 		};
 
-		if json(row.get(3)).is_err() {
-			ctx.out.excuse(
-				"fallback_keys",
-				format!("{} {}", device.0, device.1),
-				"Synapse stored invalid JSON",
-			);
+		if let Err(e) = parse_one_time_key(row.get(2), row.get(3), row.get(4)) {
+			ctx.out
+				.excuse("fallback_keys", format!("{} {}", device.0, device.1), e);
 			continue;
 		}
 
 		let unused = want.entry(device).or_default();
-		if !row.get::<_, bool>(4) {
+		if !row.get::<_, bool>(5) {
 			unused.insert(row.get(2));
 		}
 	}
