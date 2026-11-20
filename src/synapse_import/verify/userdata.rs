@@ -35,7 +35,7 @@ async fn account_data(ctx: &mut Ctx<'_>) -> Result {
 				"SELECT user_id, NULL, account_data_type, content FROM account_data WHERE \
 				 account_data_type <> 'm.push_rules' AND content <> '{}' UNION ALL SELECT \
 				 user_id, room_id, account_data_type, content FROM room_account_data WHERE \
-				 content <> '{}'",
+				 account_data_type <> 'm.tag' AND content <> '{}'",
 				&[],
 			)
 			.await?

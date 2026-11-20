@@ -75,7 +75,8 @@ async fn import_room_account_data(
 		source
 			.stream(
 				"SELECT user_id, room_id, account_data_type, content FROM room_account_data \
-				 WHERE content <> '{}' ORDER BY user_id, stream_id",
+				 WHERE account_data_type <> 'm.tag' AND content <> '{}' ORDER BY user_id, \
+				 stream_id",
 				&[],
 			)
 			.await?
