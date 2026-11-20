@@ -180,15 +180,37 @@ fn receipts_are_read_from_a_receipt_event() {
 
 #[test]
 fn push_rule_actions_normalize_or_explain() {
-	let legacy =
-		rule_actions(Some(r#"["notify", {"set_tweak": "highlight"}]"#), None).expect("readable");
-	let modern =
-		rule_actions(Some(r#"["notify", {"set_tweak": "highlight", "value": true}]"#), None)
-			.expect("readable");
+	let legacy = rule_actions(
+		"global/override/.m.rule.master",
+		Some(r#"["notify", {"set_tweak": "highlight"}]"#),
+		None,
+	)
+	.expect("readable");
+	let modern = rule_actions(
+		"global/override/.m.rule.master",
+		Some(r#"["notify", {"set_tweak": "highlight", "value": true}]"#),
+		None,
+	)
+	.expect("readable");
 	assert_eq!(legacy, modern, "the same actions, as tuwunel writes them");
 
-	assert_eq!(rule_actions(Some("nope"), None), Err("Synapse stored invalid JSON"));
-	assert_eq!(rule_actions(Some("[]"), Some("{bad")), Err("Synapse stored invalid JSON"));
+	let coalesce = rule_actions(
+		"global/override/.m.rule.master",
+		Some(r#"["coalesce", "dont_notify"]"#),
+		None,
+	)
+	.expect("legacy action strings normalized");
+	assert_eq!(coalesce, json!(["notify"]));
+
+	rule_actions("global/content/no_pattern", Some("[]"), Some("[]")).unwrap_err();
+	assert_eq!(
+		rule_actions("global/override/.m.rule.master", Some("nope"), None),
+		Err("Synapse stored invalid JSON".to_owned())
+	);
+	assert_eq!(
+		rule_actions("global/override/.m.rule.master", Some("[]"), Some("{bad")),
+		Err("Synapse stored invalid JSON".to_owned())
+	);
 }
 
 #[test]

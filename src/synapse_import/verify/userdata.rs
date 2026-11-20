@@ -7,15 +7,16 @@ use futures::TryStreamExt;
 use ruma::{
 	OwnedRoomId, RoomId, UserId,
 	events::{GlobalAccountDataEventType, push_rules::PushRulesEvent},
-	push::{Action, Ruleset},
+	push::Ruleset,
+	user_id,
 };
 use serde_json::{Map, Value};
 use tuwunel_core::Result;
 
 use super::{
 	super::{
-		push_rules::split_rule_id,
-		source::{json, user_id},
+		push_rules::{apply_rule, split_rule_id},
+		source::{json, user_id as row_user_id},
 	},
 	Ctx,
 };
@@ -41,7 +42,7 @@ async fn account_data(ctx: &mut Ctx<'_>) -> Result {
 	);
 
 	while let Some(row) = rows.try_next().await? {
-		let Ok(user_id) = user_id(&row, 0) else {
+		let Ok(user_id) = row_user_id(&row, 0) else {
 			continue;
 		};
 
@@ -160,7 +161,7 @@ async fn push_rules(ctx: &mut Ctx<'_>) -> Result {
 
 	let mut rulesets: BTreeMap<String, Option<Ruleset>> = BTreeMap::new();
 	for row in rows {
-		let Ok(user_id) = user_id(&row, 0) else {
+		let Ok(user_id) = row_user_id(&row, 0) else {
 			continue;
 		};
 
@@ -190,7 +191,7 @@ async fn push_rules(ctx: &mut Ctx<'_>) -> Result {
 		let enabled: Option<bool> = row.get(4);
 		let actions = match enabled {
 			| Some(_) => None,
-			| None => match rule_actions(row.get(2), row.get(3)) {
+			| None => match rule_actions(namespaced, row.get(2), row.get(3)) {
 				| Ok(actions) => Some(actions),
 				| Err(why) => {
 					ctx.out.excuse("push_rules", subject, why);
@@ -232,21 +233,27 @@ async fn push_rules(ctx: &mut Ctx<'_>) -> Result {
 	Ok(())
 }
 
-/// A rule row's actions, as tuwunel serializes them, or why the import
-/// couldn't take it.
+/// A rule row's actions, as tuwunel serializes them after replaying onto a
+/// default ruleset, or why the import couldn't take it.
 pub(super) fn rule_actions(
+	namespaced: &str,
 	actions: Option<&str>,
 	conditions: Option<&str>,
-) -> Result<Value, &'static str> {
-	let invalid = "Synapse stored invalid JSON";
-	if conditions.is_some_and(|conditions| json(conditions).is_err()) {
-		return Err(invalid);
-	}
+) -> Result<Value, String> {
+	let (kind, rule_id) = split_rule_id(namespaced).map_err(|e| e.to_string())?;
+	let conditions = json(conditions.unwrap_or("[]"))
+		.map_err(|_| "Synapse stored invalid JSON".to_owned())?;
+	let actions =
+		json(actions.unwrap_or("[]")).map_err(|_| "Synapse stored invalid JSON".to_owned())?;
 
-	let actions = json(actions.unwrap_or("[]")).map_err(|_| invalid)?;
-	serde_json::from_value::<Vec<Action>>(actions)
-		.and_then(serde_json::to_value)
-		.map_err(|_| "actions tuwunel can't read")
+	let mut scratch = Ruleset::server_default(user_id!("@verify:example.com"));
+	apply_rule(&mut scratch, namespaced, &conditions, actions).map_err(|e| e.to_string())?;
+
+	let rule = scratch
+		.get(kind, rule_id)
+		.ok_or_else(|| "a rule tuwunel doesn't keep".to_owned())?;
+
+	serde_json::to_value(rule.actions()).map_err(|e| e.to_string())
 }
 
 async fn filters(ctx: &mut Ctx<'_>) -> Result {

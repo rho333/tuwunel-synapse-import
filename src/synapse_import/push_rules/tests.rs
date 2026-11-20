@@ -66,3 +66,28 @@ fn apply_rule_refuses_an_unknown_kind() {
 
 	assert!(applied.is_err());
 }
+
+#[test]
+fn apply_rule_normalizes_legacy_coalesce_and_dont_notify() {
+	let mut rules = ruleset();
+	let conditions = json!([{ "kind": "event_match", "key": "content.body", "pattern": "ping" }]);
+
+	apply_rule(&mut rules, "global/content/ping", &conditions, json!(["coalesce"]))
+		.expect("coalesce normalizes to notify");
+	let ping = rules
+		.get(RuleKind::Content, "ping")
+		.expect("ping rule added");
+	assert!(matches!(ping.actions(), [Action::Notify]));
+
+	apply_rule(
+		&mut rules,
+		"global/underride/.m.rule.room_one_to_one",
+		&json!([]),
+		json!(["dont_notify"]),
+	)
+	.expect("dont_notify normalizes to empty actions");
+	let quiet = rules
+		.get(RuleKind::Underride, ".m.rule.room_one_to_one")
+		.expect("default rule present");
+	assert!(quiet.actions().is_empty());
+}
