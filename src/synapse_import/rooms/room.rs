@@ -53,7 +53,7 @@ pub(super) async fn import(
 	let mut groups = StateGroups::load(services, source, room_id).await?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
-	append_timeline(
+	let last_group = append_timeline(
 		services,
 		source,
 		room_id,
@@ -65,7 +65,9 @@ pub(super) async fn import(
 	)
 	.await?;
 
-	let state = set_current_state(services, room_id, &state_rows, &state_lock).await?;
+	let state =
+		set_current_state(services, room_id, &state_rows, &mut groups, last_group, &state_lock)
+			.await?;
 	let extremities =
 		set_forward_extremities(services, source, room_id, &skipped, &state_lock).await?;
 
@@ -111,7 +113,7 @@ async fn unstored_critical_state<'a>(
 }
 
 /// Gives each timeline event the state before it, then appends it, or only
-/// marks it soft-failed.
+/// marks it soft-failed. Returns the state group after the last appended event.
 #[expect(clippy::too_many_arguments)]
 async fn append_timeline(
 	services: &Services,
@@ -122,9 +124,10 @@ async fn append_timeline(
 	skipped: &mut HashSet<String>,
 	state_lock: &RoomMutexGuard,
 	report: &mut Report,
-) -> Result {
+) -> Result<Option<i64>> {
 	let mut timeline = pin!(events::timeline(source, room_id).await?);
 	let mut appended: usize = 0;
+	let mut last_group: Option<i64> = None;
 	while let Some(placement) = timeline.try_next().await? {
 		let Placement {
 			event_id,
@@ -145,6 +148,9 @@ async fn append_timeline(
 		// Appended by an earlier run that stopped partway through this room.
 		if let Ok(pdu_id) = services.timeline.get_pdu_id(event_id).await {
 			record(pdu_id);
+			if !soft_failed && state_group.is_some() {
+				last_group = state_group;
+			}
 			continue;
 		}
 
@@ -202,49 +208,60 @@ async fn append_timeline(
 				.append_imported_pdu(&pdu, json, state_lock)
 				.await?,
 		);
+		if state_group.is_some() {
+			last_group = state_group;
+		}
 
 		Report::count(&mut report.events);
 		Report::count(&mut appended);
 		failpoint::reached("room_events", appended).await;
 	}
 
-	Ok(())
+	Ok(last_group)
 }
 
-/// Synapse's current state, installed as the room's, with membership caches
-/// brought in line. Events that couldn't be imported stay in it, as they do in
-/// the state other servers hold. Returns how many entries had an invalid ID.
+/// Synapse's current state (or, for a left room whose `current_state_events`
+/// Synapse cleared, the state group after its last timeline event), installed
+/// as the room's with membership caches brought in line. Events that couldn't
+/// be imported stay in it, as they do in the state other servers hold. Returns
+/// how many entries had an invalid ID.
 async fn set_current_state(
 	services: &Services,
 	room_id: &RoomId,
 	rows: &[tokio_postgres::Row],
+	groups: &mut StateGroups,
+	last_group: Option<i64>,
 	state_lock: &RoomMutexGuard,
 ) -> Result<usize> {
-	if rows.is_empty() {
-		return Ok(0);
-	}
-
 	let mut dropped: usize = 0;
-	let mut state = CompressedState::new();
-	for row in rows {
-		let Ok(event_id) = <&EventId>::try_from(row.get::<_, &str>(2)) else {
-			dropped = dropped.saturating_add(1);
-			continue;
-		};
+	let state = if !rows.is_empty() {
+		let mut state = CompressedState::new();
+		for row in rows {
+			let Ok(event_id) = <&EventId>::try_from(row.get::<_, &str>(2)) else {
+				dropped = dropped.saturating_add(1);
+				continue;
+			};
 
-		let event_type = StateEventType::from(row.get::<_, &str>(0));
-		let key = services
-			.short
-			.get_or_create_shortstatekey(&event_type, row.get(1))
-			.await;
+			let event_type = StateEventType::from(row.get::<_, &str>(0));
+			let key = services
+				.short
+				.get_or_create_shortstatekey(&event_type, row.get(1))
+				.await;
 
-		state.insert(
-			services
-				.state_compressor
-				.compress_state_event(key, event_id)
-				.await,
-		);
-	}
+			state.insert(
+				services
+					.state_compressor
+					.compress_state_event(key, event_id)
+					.await,
+			);
+		}
+
+		state
+	} else if let Some(group) = last_group {
+		groups.after(group)?
+	} else {
+		return Ok(0);
+	};
 
 	let state = Arc::new(state);
 	let saved = services
