@@ -191,6 +191,16 @@ pub(super) fn user_id(row: &Row, idx: usize) -> Result<OwnedUserId> {
 		.map_err(|e| err!("Synapse user {name:?} is not a valid user ID: {e}"))
 }
 
+pub(super) fn opt_user_id(row: &Row, idx: usize) -> Result<Option<OwnedUserId>> {
+	let Some(name) = row.get::<_, Option<String>>(idx) else {
+		return Ok(None);
+	};
+
+	UserId::parse(name.as_str())
+		.map(Some)
+		.map_err(|e| err!("Synapse user {name:?} is not a valid user ID: {e}"))
+}
+
 pub(super) fn json(content: &str) -> Result<Value> {
 	serde_json::from_str(content).map_err(|e| err!("Synapse stored invalid JSON: {e}"))
 }
